@@ -7,7 +7,7 @@ struct VSRConfig {
     int windowX = CW_USEDEFAULT;
     int windowY = CW_USEDEFAULT;
     int windowW = 540;
-    int windowH = 520;
+    int windowH = 506;
 
     // Last used paths
     wchar_t lastInputPath[MAX_PATH] = L"";

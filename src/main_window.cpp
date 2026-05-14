@@ -650,6 +650,25 @@ void MainWindow::RenderUI()
         ImGui::EndPopup();
     }
 
+    // --- Auto-size window to fit content on first frame ---
+    if (!m_autoSized) {
+        float contentBottom = ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y;
+        int neededW = (int)winW;
+        int neededH = (int)(titleBarH + contentBottom + 2);
+        RECT rc;
+        GetWindowRect(m_hWnd, &rc);
+        int curW = rc.right - rc.left;
+        int curH = rc.bottom - rc.top;
+        if (neededW != curW || neededH != curH) {
+            int screenW = GetSystemMetrics(SM_CXSCREEN);
+            int screenH = GetSystemMetrics(SM_CYSCREEN);
+            int x = (screenW - neededW) / 2;
+            int y = (screenH - neededH) / 2;
+            SetWindowPos(m_hWnd, nullptr, x, y, neededW, neededH, SWP_NOZORDER);
+        }
+        m_autoSized = true;
+    }
+
     ImGui::End();
 }
 

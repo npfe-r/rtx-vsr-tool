@@ -80,6 +80,7 @@ private:
     bool               m_showCompletePopup = false;
 
     std::vector<std::string> m_gpuNames;
+    bool m_autoSized = false;
 
     std::mutex m_progressMutex;
     std::chrono::steady_clock::time_point m_startTime;

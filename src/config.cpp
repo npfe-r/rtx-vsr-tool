@@ -22,8 +22,8 @@ void Config::Load() {
 
     m_config.windowX   = r(L"Window", L"X", CW_USEDEFAULT);
     m_config.windowY   = r(L"Window", L"Y", CW_USEDEFAULT);
-    m_config.windowW   = r(L"Window", L"W", 520);
-    m_config.windowH   = r(L"Window", L"H", 400);
+    m_config.windowW   = r(L"Window", L"W", 540);
+    m_config.windowH   = r(L"Window", L"H", 506);
     m_config.qualityLevel = r(L"Params", L"Quality", 3);
     m_config.outputMode   = r(L"Params", L"OutputMode", 0);
     m_config.fixedWidth   = r(L"Params", L"FixedWidth", 3840);
