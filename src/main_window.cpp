@@ -481,7 +481,7 @@ void MainWindow::RenderUI()
     // --- Resolution ---
     ImGui::Text("分辨率");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     bool disableRes = (m_outputMode != 2) || m_isRunning;
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##w", &m_outputWidth);
@@ -490,7 +490,7 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::Text("x");
     ImGui::SameLine();
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##h", &m_outputHeight);
     if (disableRes) ImGui::EndDisabled();
@@ -499,7 +499,7 @@ void MainWindow::RenderUI()
     // --- Output FPS ---
     ImGui::Text("输出FPS");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::PushItemWidth(170);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
         m_config.Get().outputFps = m_outputFps;
@@ -525,14 +525,19 @@ void MainWindow::RenderUI()
     // --- CRF ---
     ImGui::Text("CRF");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::PushItemWidth(200);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
         m_config.Get().crf = m_crf;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
-    ImGui::Text("%d", m_crf);
+    ImGui::PushItemWidth(50);
+    if (m_isRunning) ImGui::BeginDisabled();
+    if (ImGui::InputInt("##crf_val", &m_crf, 0, 0))
+        m_config.Get().crf = m_crf;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
 
     // --- Speed ---
     ImGui::Text("编码速度");
@@ -569,9 +574,8 @@ void MainWindow::RenderUI()
     ImGui::PopItemWidth();
 
     if (m_audioMode == 2) {
-        ImGui::SameLine();
         ImGui::Text("码率");
-        ImGui::SameLine();
+        ImGui::SameLine(80);
         ImGui::PushItemWidth(250);
         if (m_isRunning) ImGui::BeginDisabled();
         static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
