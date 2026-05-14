@@ -15,7 +15,6 @@
 #include "vsr_processor.h"
 #include "video_encoder.h"
 
-// Forward declare CUDA kernel wrappers (from cuda_yuv.cu, extern "C")
 extern "C" void launch_nv12_to_rgba(
     const uint8_t* y_plane, int y_pitch,
     const uint8_t* uv_plane, int uv_pitch,
@@ -31,8 +30,8 @@ extern "C" void launch_rgba_to_nv12(
 struct PipelineConfig {
     std::wstring inputPath;
     std::wstring outputPath;
-    int qualityLevel = 3;       // 0-4
-    int outputMode   = 0;       // 0=2x, 1=4x, 2=fixed
+    int qualityLevel = 3;
+    int outputMode   = 0;
     int outputWidth  = 0;
     int outputHeight = 0;
     int encoderIndex = 0;
@@ -40,7 +39,7 @@ struct PipelineConfig {
     int encoderSpeed = 2;
     int gpuIndex = 0;
     int container = 0;
-    int outputFps = 0;          // 0 = source fps
+    int outputFps = 0;
 };
 
 struct PipelineProgress {
@@ -53,6 +52,13 @@ struct PipelineProgress {
 
 enum class PipelineState {
     Idle, Starting, Running, Paused, Completed, Error
+};
+
+enum class SlotState {
+    Empty,
+    Decoding,
+    VSR_Ready,
+    Encoding
 };
 
 class PipelineController {
@@ -73,18 +79,20 @@ public:
 private:
     void ThreadFunc();
     void ThreadFuncImpl();
+    void DecodeFunc();
     void CalculateOutputSize(int srcW, int srcH, int& dstW, int& dstH) const;
 
     static const int NUM_SLOTS = 3;
     struct FrameSlot {
-        // CPU buffers
-        uint8_t* nv12_cpu     = nullptr;  // source size, decoder output
-        uint8_t* nv12_out_cpu = nullptr;  // dest size, encoder input
-        // GPU buffers
-        uint8_t* d_nv12     = nullptr;    // source NV12 on GPU
-        uint8_t* d_rgba_src = nullptr;    // source RGBA (YUV->RGB output -> VSR input)
-        uint8_t* d_rgba_dst = nullptr;    // dest RGBA (VSR output -> RGB->YUV input)
-        uint8_t* d_nv12_out = nullptr;    // dest NV12 on GPU
+        uint8_t* nv12_cpu     = nullptr;
+        uint8_t* nv12_out_cpu = nullptr;
+        uint8_t* d_nv12       = nullptr;
+        uint8_t* d_rgba_src   = nullptr;
+        uint8_t* d_rgba_dst   = nullptr;
+        uint8_t* d_nv12_out   = nullptr;
+
+        cudaStream_t stream = nullptr;
+        std::atomic<SlotState> state{SlotState::Empty};
 
         int w = 0, h = 0;
         int dstW = 0, dstH = 0;
@@ -100,12 +108,17 @@ private:
     VSRProcessor   m_vsr;
     VideoEncoder   m_encoder;
 
-    // Audio packet queue (shared between decoder and encoder)
-    std::vector<void*> m_audioPackets;  // AVPacket*
+    std::vector<void*> m_audioPackets;
 
     std::atomic<PipelineState> m_state{PipelineState::Idle};
     std::thread m_thread;
-    std::mutex m_cvMutex;
-    std::condition_variable m_cv;
+    std::thread m_decodeThread;
+    std::mutex m_slotMutex;
+    std::condition_variable m_slotCv;
+    std::atomic<bool> m_decodeDone{false};
+    std::atomic<int> m_framesEncoded{0};
+
+    std::mutex m_pauseMutex;
+    std::condition_variable m_pauseCv;
     PipelineConfig m_cfg;
 };
