@@ -487,7 +487,7 @@ void MainWindow::RenderUI()
     // --- Encoder ---
     ImGui::Text("编码器");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(110);
+    ImGui::PushItemWidth(130);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* encoderNames[] = {
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
@@ -510,9 +510,9 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::Text("%d", m_crf);
 
-    // --- Speed / GPU ---
-    ImGui::Text("速度  ");
-    ImGui::SameLine(80);
+    ImGui::SameLine();
+    ImGui::Text("速度");
+    ImGui::SameLine();
     ImGui::PushItemWidth(90);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
@@ -521,13 +521,12 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    ImGui::SameLine();
+    // --- GPU row ---
     ImGui::Text("GPU");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(210);
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(350);
     if (m_isRunning) ImGui::BeginDisabled();
     {
-        // Build dynamic GPU name list for ImGui
         EnumGpus();
         std::vector<const char*> gpuPtrs;
         for (const auto& n : m_gpuNames)
@@ -540,10 +539,10 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    ImGui::SameLine();
+    // --- Container / Audio row ---
     ImGui::Text("封装");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(60);
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(70);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* containerNames[] = { "MP4", "MKV", "MOV" };
     if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
@@ -567,7 +566,7 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::Text("码率");
         ImGui::SameLine();
-        ImGui::PushItemWidth(70);
+        ImGui::PushItemWidth(80);
         if (m_isRunning) ImGui::BeginDisabled();
         static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
         static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
