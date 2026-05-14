@@ -67,6 +67,9 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
     if (info->totalFrames < 0) info->totalFrames = 0;
     info->hasVideo = true;
 
+    if (codec)
+        strncpy(info->videoCodecName, codec->name, sizeof(info->videoCodecName) - 1);
+
     // Find audio stream
     m->audioStreamIdx = av_find_best_stream(m->fmtCtx, AVMEDIA_TYPE_AUDIO, -1, m->videoStreamIdx, NULL, 0);
     if (m->audioStreamIdx >= 0) {
@@ -75,6 +78,10 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
         info->audioSampleRate = audioStream->codecpar->sample_rate;
         info->audioChannels = audioStream->codecpar->ch_layout.nb_channels;
         info->hasAudio = true;
+
+        const AVCodec* audioCodec = avcodec_find_decoder(audioStream->codecpar->codec_id);
+        if (audioCodec)
+            strncpy(info->audioCodecName, audioCodec->name, sizeof(info->audioCodecName) - 1);
 
         // Copy codecpar for encoder remux
         m->audioCodecPar = avcodec_parameters_alloc();

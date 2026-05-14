@@ -352,10 +352,11 @@ void MainWindow::Render()
 void MainWindow::RenderUI()
 {
     const float titleBarH = 32.0f;
+    const float leftPanelW = 185.0f;
     float winW = ImGui::GetIO().DisplaySize.x;
     float winH = ImGui::GetIO().DisplaySize.y;
 
-    // --- Custom Title Bar ---
+    // ===== Title Bar =====
     {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(winW, titleBarH));
@@ -367,81 +368,240 @@ void MainWindow::RenderUI()
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleColor();
 
-        // Title text
         ImGui::SetCursorPos(ImVec2(10, 6));
         ImGui::Text("RTX 视频超分辨率工具");
 
-        // Minimize button
         ImGui::SameLine(winW - 56);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.4f, 0.4f, 0.45f, 1.0f));
-        if (ImGui::Button("-", ImVec2(24, 24))) {
+        if (ImGui::Button("-", ImVec2(24, 24)))
             ShowWindow(m_hWnd, SW_MINIMIZE);
-        }
         ImGui::PopStyleColor(3);
 
-        // Close button
         ImGui::SameLine(winW - 28);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.6f, 0.0f, 0.0f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.8f, 0.0f, 0.0f, 1.0f));
-        if (ImGui::Button("x", ImVec2(24, 24))) {
+        if (ImGui::Button("x", ImVec2(24, 24)))
             DestroyWindow(m_hWnd);
-        }
         ImGui::PopStyleColor(3);
 
         ImGui::End();
     }
 
-    // --- Separator line between title bar and content ---
+    float contentY = titleBarH;
+    float contentH = winH - contentY;
+
+    // ===== Background separators =====
+    // Horizontal separator drawn between top-bar area and mid section will be
+    // drawn by the top-bar window itself.  Here we draw the vertical divider
+    // between the left info panel and right settings panel.
+    // The bottom horizontal separator is handled similarly.
+    // We draw all background lines here for simplicity.
+
+    // ===== Top Bar — File Selection =====
+    const float topBarH = 64.0f; // 2 rows of controls
     {
-        ImDrawList* dl = ImGui::GetBackgroundDrawList();
-        dl->AddLine(ImVec2(0, titleBarH), ImVec2(winW, titleBarH), IM_COL32(60, 60, 70, 255));
+        ImGui::SetNextWindowPos(ImVec2(0, contentY));
+        ImGui::SetNextWindowSize(ImVec2(winW, topBarH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.09f, 0.10f, 1.00f));
+        ImGui::Begin("##topbar", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoBringToFrontOnFocus |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
+
+        const float tbLabelW = 44.0f;
+        const float btnBrowseW = 58.0f;
+        ImGui::SetCursorPos(ImVec2(10, 8));
+
+        // Input file row
+        ImGui::Text("输入");
+        ImGui::SameLine(tbLabelW);
+        ImGui::PushItemWidth(winW - tbLabelW - btnBrowseW - 24);
+
+        ImGui::InputText("##inpath", m_inputPath, sizeof(m_inputPath),
+            m_isRunning ? ImGuiInputTextFlags_ReadOnly : 0);
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("浏览##in", ImVec2(btnBrowseW, 0)) && !m_isRunning)
+            OnSelectInput();
+
+        // Output file row
+        ImGui::SetCursorPos(ImVec2(10, 34));
+        ImGui::Text("输出");
+        ImGui::SameLine(tbLabelW);
+        ImGui::PushItemWidth(winW - tbLabelW - btnBrowseW - 24);
+        ImGui::InputText("##outpath", m_outputPath, sizeof(m_outputPath),
+            m_isRunning ? ImGuiInputTextFlags_ReadOnly : 0);
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("浏览##out", ImVec2(btnBrowseW, 0)) && !m_isRunning)
+            OnSelectOutput();
+
+        ImGui::End();
     }
 
-    // --- Main content ---
-    ImGui::SetNextWindowPos(ImVec2(0, titleBarH));
-    ImGui::SetNextWindowSize(ImVec2(winW, winH - titleBarH));
-    ImGui::Begin("Main", nullptr,
+    // ===== Mid Section — Info (left) + Settings (right) =====
+    const float midY = contentY + topBarH;
+
+    // Calculate mid section height from settings panel content (no scrollbar)
+    float midH;
+    {
+        float itemH = ImGui::GetFrameHeightWithSpacing();
+        float sepH  = ImGui::GetStyle().ItemSpacing.y;
+        float padY  = ImGui::GetStyle().WindowPadding.y;
+        int nControls   = (m_audioMode == 2) ? 11 : 10;
+        int nSeparators = 3;
+        midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
+    }
+
+    // Background vertical divider
+    {
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        dl->AddLine(ImVec2(leftPanelW, midY), ImVec2(leftPanelW, midY + midH),
+            IM_COL32(60, 60, 70, 255));
+    }
+
+    // ---- Left Panel ----
+    ImGui::SetNextWindowPos(ImVec2(0, midY));
+    ImGui::SetNextWindowSize(ImVec2(leftPanelW, midH));
+    ImGui::Begin("##infopanel", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    // --- Input file ---
-    ImGui::Text("输入文件");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 90);
-    ImGui::InputText("##input", m_inputPath, sizeof(m_inputPath),
-        m_isRunning ? ImGuiInputTextFlags_ReadOnly : 0);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    if (ImGui::Button("浏览...##in") && !m_isRunning)
-        OnSelectInput();
+    // Input info — top half
+    float halfH = ImGui::GetContentRegionAvail().y * 0.48f;
+    ImGui::BeginChild("##inputinfo", ImVec2(-1, halfH));
 
-    // --- Video info ---
-    if (m_inputInfo[0])
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "%s", m_inputInfo);
-
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("输入视频");
     ImGui::Spacing();
 
-    // --- Output file ---
-    ImGui::Text("输出文件");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 90);
-    ImGui::InputText("##output", m_outputPath, sizeof(m_outputPath),
-        m_isRunning ? ImGuiInputTextFlags_ReadOnly : 0);
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    if (ImGui::Button("浏览...##out") && !m_isRunning)
-        OnSelectOutput();
+    if (m_videoInfo.width > 0) {
+        ImGui::Text("分辨率");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d",
+            m_videoInfo.width, m_videoInfo.height);
+        ImGui::Text("帧率");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%.2f fps", m_videoInfo.fps);
+        if (m_videoInfo.videoCodecName[0]) {
+            ImGui::Text("编码");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", m_videoInfo.videoCodecName);
+        }
+        ImGui::Text("帧数");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", m_videoInfo.totalFrames);
+        if (m_videoInfo.hasAudio) {
+            char audioBuf[96];
+            if (m_videoInfo.audioCodecName[0])
+                snprintf(audioBuf, sizeof(audioBuf), "%s  %dHz %dch",
+                    m_videoInfo.audioCodecName, m_videoInfo.audioSampleRate, m_videoInfo.audioChannels);
+            else
+                snprintf(audioBuf, sizeof(audioBuf), "%dHz %dch",
+                    m_videoInfo.audioSampleRate, m_videoInfo.audioChannels);
+            ImGui::Text("音频");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", audioBuf);
+        } else {
+            ImGui::Text("音频");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "无");
+        }
+    } else {
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "未选择文件");
+    }
 
-    ImGui::Separator();
+    ImGui::EndChild(); // ##inputinfo
 
-    // --- GPU row ---
+    // Separator between input and output info
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        dl->AddLine(ImVec2(p.x + 4, p.y), ImVec2(p.x + leftPanelW - 4, p.y),
+            IM_COL32(60, 60, 70, 255));
+    }
+    ImGui::Spacing();
+
+    // Output info — bottom half
+    ImGui::BeginChild("##outputinfo", ImVec2(-1, halfH));
+
+    ImGui::Text("输出视频");
+    ImGui::Spacing();
+
+    if (m_videoInfo.width > 0) {
+        int srcW = m_videoInfo.width;
+        int srcH = m_videoInfo.height;
+        int outW, outH;
+        if (m_outputMode == 0) { outW = srcW * 2; outH = srcH * 2; }
+        else if (m_outputMode == 1) { outW = srcW * 4; outH = srcH * 4; }
+        else { outW = m_outputWidth; outH = m_outputHeight; }
+        outW = (outW + 15) & ~15;
+        outH = (outH + 15) & ~15;
+
+        ImGui::Text("分辨率");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d", outW, outH);
+
+        // Output FPS
+        double outFps = m_outputFps > 0 ? (double)m_outputFps : m_videoInfo.fps;
+        ImGui::Text("帧率");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%.2f fps", outFps);
+
+        static const char* encNames[] = {"H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
+                                         "libx264", "libx265", "libaom-av1"};
+        ImGui::Text("编码");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
+
+        // Estimate output frame count (same as source unless fps changes)
+        int outFrames = m_videoInfo.totalFrames;
+        ImGui::Text("帧数");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", outFrames);
+
+        static const char* audNames[] = {"无", "复制", "AAC"};
+        ImGui::Text("音频");
+        ImGui::SameLine();
+        if (m_audioMode == 0)
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "无");
+        else if (m_audioMode == 2)
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_audioBitrate);
+        else
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
+    } else {
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "选择文件后显示");
+    }
+
+    ImGui::EndChild(); // ##outputinfo
+
+    ImGui::End(); // ##infopanel
+
+    // ---- Right Panel — Settings ----
+    const float labelW = 76.0f;
+    const float btnBrowseW = 58.0f;
+    const float rightX = leftPanelW + 1;
+    const float rightW = winW - rightX;
+
+    ImGui::SetNextWindowPos(ImVec2(rightX, midY));
+    ImGui::SetNextWindowSize(ImVec2(rightW, midH));
+    ImGui::Begin("##settings", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    // GPU
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("GPU");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     {
         EnumGpus();
@@ -456,21 +616,24 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- Quality ---
+    // Quality
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("质量");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* qualityNames[] = { "双三次", "低质量", "中等", "高质量", "极致" };
     if (ImGui::Combo("##quality", &m_qualityLevel, qualityNames, 5))
         m_config.Get().qualityLevel = m_qualityLevel;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
+    ImGui::Separator();
 
-    // --- Output Size ---
-    ImGui::Text("输出尺寸");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    // Output Size
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("尺寸");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* outputModes[] = { "2倍", "4倍", "自定义" };
     if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
@@ -478,40 +641,42 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- Resolution ---
+    // Resolution
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("分辨率");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(113);
+    ImGui::SameLine(labelW);
     bool disableRes = (m_outputMode != 2) || m_isRunning;
     if (disableRes) ImGui::BeginDisabled();
-    ImGui::InputInt("##w", &m_outputWidth);
-    if (disableRes) ImGui::EndDisabled();
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.44f);
+    ImGui::InputInt("##outw", &m_outputWidth);
     ImGui::PopItemWidth();
     ImGui::SameLine();
     ImGui::Text("x");
     ImGui::SameLine();
-    ImGui::PushItemWidth(113);
-    if (disableRes) ImGui::BeginDisabled();
-    ImGui::InputInt("##h", &m_outputHeight);
-    if (disableRes) ImGui::EndDisabled();
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::InputInt("##outh", &m_outputHeight);
     ImGui::PopItemWidth();
+    if (disableRes) ImGui::EndDisabled();
 
-    // --- Output FPS ---
-    ImGui::Text("输出FPS");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(185);
+    // Output FPS
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("FPS");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 75);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
         m_config.Get().outputFps = m_outputFps;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
-    ImGui::TextDisabled("(0=源帧率)");
+    ImGui::TextDisabled("0=源帧率");
+    ImGui::Separator();
 
-    // --- Encoder ---
+    // Encoder
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("编码器");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* encoderNames[] = {
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
@@ -522,20 +687,22 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- CRF ---
+    // CRF
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("CRF");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(200);
+    ImGui::SameLine(labelW);
+    float crfSliderW = ImGui::GetContentRegionAvail().x - 56.0f;
+    ImGui::PushItemWidth(crfSliderW);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
         m_config.Get().crf = m_crf;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
-    ImGui::PushItemWidth(43);
+    ImGui::PushItemWidth(46);
     if (m_isRunning) ImGui::BeginDisabled();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(13, ImGui::GetStyle().FramePadding.y));
-    if (ImGui::InputInt("##crf_val", &m_crf, 0, 0)) {
+    if (ImGui::InputInt("##crfv", &m_crf, 0, 0)) {
         if (m_crf < 0) m_crf = 0;
         if (m_crf > 51) m_crf = 51;
         m_config.Get().crf = m_crf;
@@ -544,10 +711,11 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- Speed ---
-    ImGui::Text("编码速度");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    // Speed
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("速度");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
     if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
@@ -555,33 +723,36 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- Container ---
-    ImGui::Text("封装格式");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    // Container
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("封装");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* containerNames[] = { "MP4", "MKV", "MOV" };
     if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
         m_config.Get().containerFormat = m_containerFormat;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
+    ImGui::Separator();
 
-    // --- Audio + Bitrate ---
+    // Audio
+    ImGui::AlignTextToFramePadding();
     ImGui::Text("音频");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(250);
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* audioModes[] = { "无音频", "复制源", "AAC编码" };
-    if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3)) {
+    if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3))
         m_config.Get().audioMode = m_audioMode;
-    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
     if (m_audioMode == 2) {
+        ImGui::AlignTextToFramePadding();
         ImGui::Text("码率");
-        ImGui::SameLine(80);
-        ImGui::PushItemWidth(250);
+        ImGui::SameLine(labelW);
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
         if (m_isRunning) ImGui::BeginDisabled();
         static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
         static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
@@ -597,19 +768,44 @@ void MainWindow::RenderUI()
         ImGui::PopItemWidth();
     }
 
-    ImGui::Separator();
+    ImGui::End(); // ##settings
 
-    // --- Progress ---
-    ImGui::ProgressBar(m_progressPct / 100.0f, ImVec2(-1, 0), "");
-    ImGui::Text("%s", m_statusText[0] ? m_statusText : "就绪");
+    // ===== Bottom Bar — Progress + Buttons =====
+    const float bottomY = midY + midH;
+    const float bottomBarH = (contentH - topBarH - midH < 85.0f) ? 85.0f : contentH - topBarH - midH;
 
-    ImGui::Spacing();
+    {
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        dl->AddLine(ImVec2(0, bottomY), ImVec2(winW, bottomY), IM_COL32(60, 60, 70, 255));
+    }
 
-    // --- Buttons ---
+    ImGui::SetNextWindowPos(ImVec2(0, bottomY));
+    ImGui::SetNextWindowSize(ImVec2(winW, bottomBarH));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.09f, 0.10f, 1.00f));
+    ImGui::Begin("##bottombar", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
+
+    ImGui::SetCursorPos(ImVec2(10, 6));
+    ImGui::ProgressBar(m_progressPct / 100.0f, ImVec2(winW - 24, 0), "");
+
+    {
+        const char* status = m_statusText[0] ? m_statusText : "就绪";
+        float tw = ImGui::CalcTextSize(status).x;
+        ImGui::SetCursorPos(ImVec2((winW - tw) * 0.5f, 32));
+        ImGui::Text("%s", status);
+    }
+
+    // Buttons
     float btnWidth = 100.0f;
-    float avail    = ImGui::GetContentRegionAvail().x;
-    float offset   = (avail - btnWidth * 2 - 20) * 0.5f;
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
+    float btnY = ImGui::GetCursorPosY() + 4;
+    float btnAreaW = winW - 20;
+    float btnOffset = (btnAreaW - btnWidth * 2 - 16) * 0.5f;
+
+    ImGui::SetCursorPos(ImVec2(10 + btnOffset, btnY));
 
     if (!m_isRunning) {
         if (ImGui::Button("开始", ImVec2(btnWidth, 0)))
@@ -650,26 +846,23 @@ void MainWindow::RenderUI()
         ImGui::EndPopup();
     }
 
-    // --- Auto-size window to fit content on first frame ---
+    ImGui::End(); // ##bottombar
+
+    // ===== Auto-size window on first frame =====
     if (!m_autoSized) {
-        float contentBottom = ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y;
-        int neededW = (int)winW;
-        int neededH = (int)(titleBarH + contentBottom + 2);
+        int neededH = (int)(titleBarH + topBarH + midH + 85.0f + 2);
         RECT rc;
         GetWindowRect(m_hWnd, &rc);
-        int curW = rc.right - rc.left;
         int curH = rc.bottom - rc.top;
-        if (neededW != curW || neededH != curH) {
+        if (neededH != curH) {
             int screenW = GetSystemMetrics(SM_CXSCREEN);
             int screenH = GetSystemMetrics(SM_CYSCREEN);
-            int x = (screenW - neededW) / 2;
+            int x = (screenW - (int)winW) / 2;
             int y = (screenH - neededH) / 2;
-            SetWindowPos(m_hWnd, nullptr, x, y, neededW, neededH, SWP_NOZORDER);
+            SetWindowPos(m_hWnd, nullptr, x, y, (int)winW, neededH, SWP_NOZORDER);
         }
         m_autoSized = true;
     }
-
-    ImGui::End();
 }
 
 // ============================================================================

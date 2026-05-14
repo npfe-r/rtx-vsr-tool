@@ -9,6 +9,8 @@ struct VideoInfo {
     int totalFrames = 0;
     bool hasVideo = false;
     bool hasAudio = false;
+    char videoCodecName[32] = "";
+    char audioCodecName[32] = "";
 
     // Audio info for remux
     int audioStreamIndex = -1;
