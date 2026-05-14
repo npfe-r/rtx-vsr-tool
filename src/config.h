@@ -6,8 +6,8 @@ struct VSRConfig {
     // Window state
     int windowX = CW_USEDEFAULT;
     int windowY = CW_USEDEFAULT;
-    int windowW = 640;
-    int windowH = 480;
+    int windowW = 540;
+    int windowH = 520;
 
     // Last used paths
     wchar_t lastInputPath[MAX_PATH] = L"";
