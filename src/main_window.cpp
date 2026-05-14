@@ -462,20 +462,23 @@ void MainWindow::RenderUI()
     if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
         m_config.Get().outputMode = m_outputMode;
 
-    if (m_outputMode == 2) {
-        ImGui::SameLine();
-        ImGui::Text("宽");
-        ImGui::SameLine();
-        ImGui::PushItemWidth(60);
-        ImGui::InputInt("##w", &m_outputWidth);
-        ImGui::PopItemWidth();
-        ImGui::SameLine();
-        ImGui::Text("高");
-        ImGui::SameLine();
-        ImGui::PushItemWidth(60);
-        ImGui::InputInt("##h", &m_outputHeight);
-        ImGui::PopItemWidth();
-    }
+    ImGui::SameLine();
+    ImGui::Text("宽");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(60);
+    bool disableRes = (m_outputMode != 2) || m_isRunning;
+    if (disableRes) ImGui::BeginDisabled();
+    ImGui::InputInt("##w", &m_outputWidth);
+    if (disableRes) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::Text("高");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(60);
+    if (disableRes) ImGui::BeginDisabled();
+    ImGui::InputInt("##h", &m_outputHeight);
+    if (disableRes) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
