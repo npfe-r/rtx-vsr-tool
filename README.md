@@ -1,6 +1,6 @@
 # RTX VSR Tool
 
-基于 NVIDIA RTX Video Super Resolution (VSR) 的 Windows 视频 AI 升频工具。使用 Dear ImGui (D3D11) 构建界面，FFmpeg 进行编解码，CUDA 完成色彩转换和 NGX 推理。
+基于 NVIDIA RTX Video Super Resolution (VSR) 的 Windows 视频 AI 升频工具。使用 Win32 API 构建界面，FFmpeg 进行编解码，CUDA 完成色彩转换和 NGX 推理。
 
 ## 功能
 
@@ -88,35 +88,59 @@ cmake --build build --config Release --target ngx_init_test
 
 ### 线程模型
 
-- **主线程**：Win32 消息循环 + ImGui 渲染 + D3D11 交换链
-- **工作线程**：解码 → VSR → 编码循环，通过 `PostMessageW` 通信进度
+- **主线程**：Win32 消息循环，通过回调接收进度更新
+- **解码线程**：FFmpeg 解码 → H2D 传输 → CUDA NV12→RGBA 转换，完成后将槽位标记为 `VSR_Ready`
+- **GPU 线程**：消费 `VSR_Ready` 槽位，执行 NGX VSR 推理 → RGBA→NV12 转换 → D2H 传输 → FFmpeg 编码
 - **状态机**：`Idle → Starting → Running ↔ Paused → Completed/Error`，`std::atomic` + `std::condition_variable` 实现
+- **槽位同步**：每个 `FrameSlot` 具有 `std::atomic<SlotState>` 状态（`Empty → Decoding → VSR_Ready → Encoding → Empty`），CAS 操作实现无锁获取，`condition_variable` 实现线程间通知
 
 ### 数据处理管线
 
+解码线程（逐帧循环）：
 ```
 FFmpeg 解码器（CPU 上输出 NV12）
-    ↓ cudaMemcpyAsync H2D
+    ↓ cudaMemcpyAsync H2D（per-slot non-blocking stream）
 CUDA 核函数: nv12_to_rgba（BT.709 色彩空间）
-    ↓
+    ↓ slot.state → VSR_Ready（通知 GPU 线程）
+```
+
+GPU 线程（消费 VSR_Ready 槽位）：
+```
 NGX VSR 推理
     ↓
 CUDA 核函数: rgba_to_nv12（BT.709 色彩空间）
-    ↓ cudaMemcpyAsync D2H
+    ↓ cudaMemcpyAsync D2H（per-slot non-blocking stream）
 FFmpeg 编码器（NV12 → H.264/HEVC/AV1）
+    ↓ slot.state → Empty（通知解码线程）
 ```
+
+两个线程通过 3 个 FrameSlot 的原子状态同步，解码第 N+1 帧与编码第 N-1 帧可重叠执行。
 
 ### 3-Slot 帧流水线
 
-三个 `FrameSlot` 循环使用，解码第 N+1 帧与编码第 N-1 帧重叠执行。每个 Slot 在管线启动时一次性分配 GPU 显存。
+三个 `FrameSlot` 循环使用，每个 Slot 在管线启动时一次性分配 GPU 显存和固定页面主机内存（`cudaMallocHost`，提升 DMA 传输带宽 2-3x），每个 Slot 拥有独立的 Non-Blocking CUDA Stream 以支持 GPU 内核并发执行。
+
+```
+时序示例（稳定运行后）:
+
+时间 →  Slot 0                  Slot 1                  Slot 2
+        ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+        │ Decode(N)       │     │ Decode(N+1)     │     │ Decode(N+2)     │
+        │ H2D + YUV→RGB   │     │ H2D + YUV→RGB   │     │ H2D + YUV→RGB   │
+        │                 │     │                 │     │                 │
+        │ VSR(N)          │     │ VSR(N+1)        │     │ VSR(N+2)        │
+        │ RGB→YUV + D2H   │     │ RGB→YUV + D2H   │     │ RGB→YUV + D2H   │
+        │ Encode(N)       │     │ Encode(N+1)     │     │ Encode(N+2)     │
+        └─────────────────┘     └─────────────────┘     └─────────────────┘
+```
 
 ### 项目结构
 
 ```
 src/
 ├── main.cpp                 # WinMain、消息循环、SEH 异常保护
-├── main_window.cpp/h        # ImGui 界面、D3D11 交换链、文件对话框
-├── pipeline_ctrl.cpp/h      # PipelineController — 工作线程、3-Slot 帧管理
+├── main_window.cpp/h        # Win32 界面、文件对话框、进度显示
+├── pipeline_ctrl.cpp/h      # PipelineController — 解码线程 + GPU 线程、3-Slot 帧状态机
 ├── vsr_processor.cpp/h      # VSRProcessor — NGX CUDA 初始化/推理/关闭
 ├── rtx_video_api_cuda_impl.cpp  # NGX CUDA 实现（NVIDIA 示例代码）
 ├── video_decoder.cpp/h      # FFmpeg 解码 → NV12、音频包队列
