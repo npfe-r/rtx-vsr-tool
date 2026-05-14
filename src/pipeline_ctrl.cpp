@@ -201,6 +201,7 @@ void PipelineController::DecodeFunc() {
 }
 
 void PipelineController::ThreadFuncImpl() {
+    std::chrono::time_point<std::chrono::high_resolution_clock> lastReport;
     LogDbg("--- Pipeline GPU thread started ---");
 
     if (m_state.load() != PipelineState::Starting) {
@@ -350,7 +351,7 @@ void PipelineController::ThreadFuncImpl() {
     vsrCtx.vsr     = &m_vsr;
     vsrCtx.quality = (VSRQuality)m_cfg.qualityLevel;
 
-    auto lastReport = std::chrono::high_resolution_clock::now();
+    lastReport = std::chrono::high_resolution_clock::now();
 
     while (true) {
         if (m_state.load() == PipelineState::Paused) {
