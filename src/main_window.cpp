@@ -165,16 +165,16 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
     // Load Chinese-capable font with fallback paths
     ImFontConfig fontCfg;
     fontCfg.SizePixels = 16.0f;
-    const wchar_t* fontPaths[] = {
-        L"C:\\Windows\\Fonts\\msyh.ttc",
-        L"C:\\Windows\\Fonts\\msyhbd.ttc",
-        L"C:\\Windows\\Fonts\\simhei.ttf",
-        L"C:\\Windows\\Fonts\\yahei.ttf",
+    const char* fontPaths[] = {
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\msyhbd.ttc",
+        "C:\\Windows\\Fonts\\simhei.ttf",
+        "C:\\Windows\\Fonts\\yahei.ttf",
     };
     ImFont* font = nullptr;
     for (auto* fp : fontPaths) {
         font = io.Fonts->AddFontFromFileTTF(
-            (const char*)fp, 16.0f, &fontCfg,
+            fp, 16.0f, &fontCfg,
             io.Fonts->GetGlyphRangesChineseFull());
         if (font) break;
     }
