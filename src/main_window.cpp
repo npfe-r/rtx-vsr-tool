@@ -481,7 +481,7 @@ void MainWindow::RenderUI()
     // --- Resolution ---
     ImGui::Text("分辨率");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(100);
+    ImGui::PushItemWidth(115);
     bool disableRes = (m_outputMode != 2) || m_isRunning;
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##w", &m_outputWidth);
@@ -490,7 +490,7 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::Text("x");
     ImGui::SameLine();
-    ImGui::PushItemWidth(100);
+    ImGui::PushItemWidth(115);
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##h", &m_outputHeight);
     if (disableRes) ImGui::EndDisabled();
@@ -499,7 +499,7 @@ void MainWindow::RenderUI()
     // --- Output FPS ---
     ImGui::Text("输出FPS");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(170);
+    ImGui::PushItemWidth(185);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
         m_config.Get().outputFps = m_outputFps;
@@ -525,7 +525,7 @@ void MainWindow::RenderUI()
     // --- CRF ---
     ImGui::Text("CRF");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(200);
+    ImGui::PushItemWidth(210);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
         m_config.Get().crf = m_crf;
@@ -534,8 +534,10 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::PushItemWidth(50);
     if (m_isRunning) ImGui::BeginDisabled();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(13, ImGui::GetStyle().FramePadding.y));
     if (ImGui::InputInt("##crf_val", &m_crf, 0, 0))
         m_config.Get().crf = m_crf;
+    ImGui::PopStyleVar();
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
