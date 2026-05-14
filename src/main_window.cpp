@@ -438,89 +438,6 @@ void MainWindow::RenderUI()
 
     ImGui::Separator();
 
-    // --- AI Processing ---
-    ImGui::Text("AI 处理");
-
-    static const char* qualityNames[] = { "双三次", "低质量", "中等", "高质量", "极致" };
-    for (int i = 0; i < 5; i++) {
-        if (i > 0) ImGui::SameLine();
-        if (m_isRunning) ImGui::BeginDisabled();
-        if (ImGui::RadioButton(qualityNames[i], &m_qualityLevel, i)) {
-            m_config.Get().qualityLevel = i;
-        }
-        if (m_isRunning) ImGui::EndDisabled();
-    }
-
-    ImGui::Spacing();
-
-    // --- Output Size ---
-    ImGui::Text("输出尺寸");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(90);
-    if (m_isRunning) ImGui::BeginDisabled();
-    static const char* outputModes[] = { "2倍", "4倍", "自定义" };
-    if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
-        m_config.Get().outputMode = m_outputMode;
-
-    ImGui::SameLine();
-    ImGui::Text("宽");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(60);
-    bool disableRes = (m_outputMode != 2) || m_isRunning;
-    if (disableRes) ImGui::BeginDisabled();
-    ImGui::InputInt("##w", &m_outputWidth);
-    if (disableRes) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::Text("高");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(60);
-    if (disableRes) ImGui::BeginDisabled();
-    ImGui::InputInt("##h", &m_outputHeight);
-    if (disableRes) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-    if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-
-    ImGui::Spacing();
-
-    // --- Encoder ---
-    ImGui::Text("编码器");
-    ImGui::SameLine(80);
-    ImGui::PushItemWidth(130);
-    if (m_isRunning) ImGui::BeginDisabled();
-    static const char* encoderNames[] = {
-        "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
-        "libx264", "libx265", "libaom-av1"
-    };
-    if (ImGui::Combo("##enc", &m_encoderIndex, encoderNames, 6))
-        m_config.Get().encoderIndex = m_encoderIndex;
-    if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-
-    ImGui::SameLine();
-    ImGui::Text("CRF");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(150);
-    if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
-        m_config.Get().crf = m_crf;
-    if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::Text("%d", m_crf);
-
-    ImGui::SameLine();
-    ImGui::Text("速度");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(90);
-    if (m_isRunning) ImGui::BeginDisabled();
-    static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
-    if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
-        m_config.Get().encoderSpeed = m_encoderSpeed;
-    if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-
     // --- GPU row ---
     ImGui::Text("GPU");
     ImGui::SameLine(80);
@@ -539,8 +456,97 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // --- Container / Audio row ---
-    ImGui::Text("封装");
+    // --- Quality ---
+    ImGui::Text("质量");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(120);
+    if (m_isRunning) ImGui::BeginDisabled();
+    static const char* qualityNames[] = { "双三次", "低质量", "中等", "高质量", "极致" };
+    if (ImGui::Combo("##quality", &m_qualityLevel, qualityNames, 5))
+        m_config.Get().qualityLevel = m_qualityLevel;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // --- Output Size ---
+    ImGui::Text("输出尺寸");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(90);
+    if (m_isRunning) ImGui::BeginDisabled();
+    static const char* outputModes[] = { "2倍", "4倍", "自定义" };
+    if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
+        m_config.Get().outputMode = m_outputMode;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // --- Resolution ---
+    ImGui::Text("分辨率");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(70);
+    bool disableRes = (m_outputMode != 2) || m_isRunning;
+    if (disableRes) ImGui::BeginDisabled();
+    ImGui::InputInt("##w", &m_outputWidth);
+    if (disableRes) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::Text("x");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(70);
+    if (disableRes) ImGui::BeginDisabled();
+    ImGui::InputInt("##h", &m_outputHeight);
+    if (disableRes) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // --- Output FPS ---
+    ImGui::Text("输出FPS");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(80);
+    if (m_isRunning) ImGui::BeginDisabled();
+    if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
+        m_config.Get().outputFps = m_outputFps;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::TextDisabled("(0=源帧率)");
+
+    // --- Encoder ---
+    ImGui::Text("编码器");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(130);
+    if (m_isRunning) ImGui::BeginDisabled();
+    static const char* encoderNames[] = {
+        "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
+        "libx264", "libx265", "libaom-av1"
+    };
+    if (ImGui::Combo("##enc", &m_encoderIndex, encoderNames, 6))
+        m_config.Get().encoderIndex = m_encoderIndex;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // --- CRF ---
+    ImGui::Text("CRF");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(200);
+    if (m_isRunning) ImGui::BeginDisabled();
+    if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
+        m_config.Get().crf = m_crf;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::Text("%d", m_crf);
+
+    // --- Speed ---
+    ImGui::Text("编码速度");
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(90);
+    if (m_isRunning) ImGui::BeginDisabled();
+    static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
+    if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
+        m_config.Get().encoderSpeed = m_encoderSpeed;
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // --- Container ---
+    ImGui::Text("封装格式");
     ImGui::SameLine(80);
     ImGui::PushItemWidth(70);
     if (m_isRunning) ImGui::BeginDisabled();
@@ -550,10 +556,10 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    ImGui::SameLine();
+    // --- Audio + Bitrate ---
     ImGui::Text("音频");
-    ImGui::SameLine();
-    ImGui::PushItemWidth(90);
+    ImGui::SameLine(80);
+    ImGui::PushItemWidth(100);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* audioModes[] = { "无音频", "复制源", "AAC编码" };
     if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3)) {
@@ -745,7 +751,7 @@ void MainWindow::OnStartStop()
         pc.container    = m_containerFormat;
         pc.audioMode = m_audioMode;
         pc.audioBitrate = m_audioBitrate;
-        pc.outputFps    = 0;
+        pc.outputFps    = m_outputFps;
 
         cfg.qualityLevel = m_qualityLevel;
         cfg.outputMode   = m_outputMode;
@@ -859,6 +865,7 @@ void MainWindow::LoadConfigToUI()
     m_containerFormat = cfg.containerFormat;
     m_audioMode    = cfg.audioMode;
     m_audioBitrate    = cfg.audioBitrate;
+    m_outputFps       = cfg.outputFps;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -886,4 +893,5 @@ void MainWindow::SaveUIToConfig()
     cfg.containerFormat = m_containerFormat;
     cfg.audioMode    = m_audioMode;
     cfg.audioBitrate    = m_audioBitrate;
+    cfg.outputFps       = m_outputFps;
 }

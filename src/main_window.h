@@ -68,6 +68,7 @@ private:
     int     m_containerFormat  = 0;
     int     m_audioMode        = 2;
     int     m_audioBitrate     = 128;
+    int     m_outputFps        = 0;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]  = {};
 
