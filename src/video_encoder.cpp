@@ -122,8 +122,11 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
 
     // NVENC settings
     if (isNVENC) {
-        av_opt_set(m->encCtx->priv_data, "preset",
-                   cfg.speed <= 1 ? "p1" : cfg.speed == 2 ? "p4" : "p7", 0);
+        const char* nvPresets[] = { "p1", "p3", "p4", "p6", "p7" };
+        int idx = cfg.speed;
+        if (idx < 0) idx = 0;
+        if (idx > 4) idx = 4;
+        av_opt_set(m->encCtx->priv_data, "preset", nvPresets[idx], 0);
         av_opt_set_int(m->encCtx->priv_data, "cq", cfg.crf, 0);
         av_opt_set(m->encCtx->priv_data, "rc", "vbr", 0);
         av_opt_set_int(m->encCtx->priv_data, "b", 0, 0);
@@ -133,14 +136,13 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
         char crfStr[8];
         snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
         av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
-        const char* presets[] = {
-            "ultrafast", "superfast", "veryfast", "faster", "fast",
-            "medium", "slow", "slower", "veryslow"
+        const char* swPresets[] = {
+            "ultrafast", "superfast", "veryfast", "medium", "veryslow"
         };
-        int idx = (cfg.speed * 2);
+        int idx = cfg.speed;
         if (idx < 0) idx = 0;
-        if (idx > 8) idx = 8;
-        av_opt_set(m->encCtx->priv_data, "preset", presets[idx], 0);
+        if (idx > 4) idx = 4;
+        av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
     }
 
     { char _b[256]; snprintf(_b, sizeof(_b), "avcodec_open2(%s)...", encoderName); EncLog(_b); }

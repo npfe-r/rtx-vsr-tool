@@ -27,7 +27,6 @@
 | FFmpeg 8.1.1 shared | [`ffmpeg-8.1.1-full_build-shared/`](../ffmpeg-8.1.1-full_build-shared/) |
 | NVIDIA RTX Video SDK v1.1.0 | [`RTX_Video_SDK_v1.1.0/`](../RTX_Video_SDK_v1.1.0/) |
 | NVIDIA DLSS SDK 310.6 (NGX Core) | [`DLSS-310.6.0/`](../DLSS-310.6.0/) |
-| Dear ImGui v1.91.0 | CMake FetchContent 自动拉取（Gitee 镜像） |
 
 构建脚本期望以下目录与 `RTX_VSR_CMake/` 平级：
 

@@ -88,7 +88,7 @@ void PipelineController::CalculateOutputSize(int srcW, int srcH, int& dstW, int&
     dstH = (dstH + 15) & ~15;
 }
 
-static bool CheckCuda(const char* tag) {
+static bool CudaFailed(const char* tag) {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         char buf[256];
@@ -108,10 +108,13 @@ void PipelineController::ThreadFunc() {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         LogDbg("SEH EXCEPTION CAUGHT in pipeline thread!");
         for (int i = 0; i < NUM_SLOTS; i++) {
-            if (m_slots[i].nv12_cpu)     cudaFreeHost(m_slots[i].nv12_cpu);
-            if (m_slots[i].nv12_out_cpu) cudaFreeHost(m_slots[i].nv12_out_cpu);
-            m_slots[i].nv12_cpu = nullptr;
-            m_slots[i].nv12_out_cpu = nullptr;
+            if (m_slots[i].nv12_cpu)     { cudaFreeHost(m_slots[i].nv12_cpu); m_slots[i].nv12_cpu = nullptr; }
+            if (m_slots[i].nv12_out_cpu) { cudaFreeHost(m_slots[i].nv12_out_cpu); m_slots[i].nv12_out_cpu = nullptr; }
+            if (m_slots[i].d_nv12)       cudaFree(m_slots[i].d_nv12);
+            if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
+            if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
+            if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
+            if (m_slots[i].stream)       cudaStreamDestroy(m_slots[i].stream);
         }
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
         m_state.store(PipelineState::Error);
@@ -175,7 +178,7 @@ void PipelineController::DecodeFunc() {
             slot.d_rgba_src, m_srcW * 4,
             m_srcW, m_srcH, slot.stream);
         cudaStreamSynchronize(slot.stream);
-        if (CheckCuda("Decode: NV12->RGBA")) {
+        if (CudaFailed("Decode: NV12->RGBA")) {
             LogDbg("Decode: CUDA error in NV12->RGBA");
             m_state.store(PipelineState::Error);
             slot.state.store(SlotState::Empty);
@@ -216,7 +219,7 @@ void PipelineController::ThreadFuncImpl() {
             return;
         }
         cudaFree(0);
-        CheckCuda("cudaFree(0)");
+        CudaFailed("cudaFree(0)");
         LogDbg("CUDA runtime initialized");
     }
 
@@ -421,7 +424,7 @@ void PipelineController::ThreadFuncImpl() {
         cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, nv12OutSize,
                         cudaMemcpyDeviceToHost, slot.stream);
         cudaStreamSynchronize(slot.stream);
-        if (CheckCuda("GPU: RGBA->NV12 + D2H")) {
+        if (CudaFailed("GPU: RGBA->NV12 + D2H")) {
             LogDbg("GPU: CUDA error in RGBA->NV12 or D2H");
             m_state.store(PipelineState::Error);
             break;
