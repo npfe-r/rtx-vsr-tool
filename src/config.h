@@ -25,6 +25,8 @@ struct VSRConfig {
     int gpuIndex = 0;
     int containerFormat = 0;        // 0=mp4, 1=mkv, 2=mov
     int outputFps = 0;              // 0=source fps
+    int audioEnabled = 1;           // 0=no audio, 1=include audio
+    int audioBitrate = 128;         // kbps: 64, 96, 128, 192, 256, 320
 };
 
 class Config {

@@ -158,7 +158,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
     m->videoStream->time_base = m->encCtx->time_base;
 
     // Audio stream setup (transcode to AAC for maximum compatibility)
-    if (cfg.hasAudio && cfg.audioPackets && cfg.audioStreamIdx >= 0 && cfg.audioCodecPar) {
+    if (cfg.hasAudio && cfg.audioEnabled && cfg.audioPackets && cfg.audioStreamIdx >= 0 && cfg.audioCodecPar) {
         m->audioPackets = static_cast<std::vector<AVPacket*>*>(cfg.audioPackets);
         AVCodecParameters* srcPar = static_cast<AVCodecParameters*>(cfg.audioCodecPar);
 
@@ -176,7 +176,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
                     m->audioEncCtx->sample_rate = m->audioDecCtx->sample_rate;
                     m->audioEncCtx->ch_layout   = m->audioDecCtx->ch_layout;
                     m->audioEncCtx->sample_fmt  = AV_SAMPLE_FMT_FLTP;
-                    m->audioEncCtx->bit_rate    = 128000;
+                    m->audioEncCtx->bit_rate    = cfg.audioBitrate * 1000;
 
                     if (avcodec_open2(m->audioEncCtx, encCodec, NULL) >= 0) {
                         // Create resampler for format conversion

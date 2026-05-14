@@ -548,6 +548,34 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
+    ImGui::SameLine();
+    if (m_isRunning) ImGui::BeginDisabled();
+    if (ImGui::Checkbox("音频", &m_audioEnabledBool)) {
+        m_audioEnabled = m_audioEnabledBool ? 1 : 0;
+        m_config.Get().audioEnabled = m_audioEnabled;
+    }
+    if (m_isRunning) ImGui::EndDisabled();
+
+    if (m_audioEnabledBool) {
+        ImGui::SameLine();
+        ImGui::Text("码率");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(70);
+        if (m_isRunning) ImGui::BeginDisabled();
+        static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
+        static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
+        int brIdx = 2;
+        for (int i = 0; i < 6; i++) {
+            if (m_audioBitrate == bitrateValues[i]) { brIdx = i; break; }
+        }
+        if (ImGui::Combo("##abr", &brIdx, bitrateNames, 6)) {
+            m_audioBitrate = bitrateValues[brIdx];
+            m_config.Get().audioBitrate = m_audioBitrate;
+        }
+        if (m_isRunning) ImGui::EndDisabled();
+        ImGui::PopItemWidth();
+    }
+
     ImGui::Separator();
 
     // --- Progress ---
@@ -709,6 +737,8 @@ void MainWindow::OnStartStop()
         pc.encoderSpeed = m_encoderSpeed;
         pc.gpuIndex     = m_gpuIndex;
         pc.container    = m_containerFormat;
+        pc.audioEnabled = m_audioEnabled;
+        pc.audioBitrate = m_audioBitrate;
         pc.outputFps    = 0;
 
         cfg.qualityLevel = m_qualityLevel;
@@ -821,6 +851,9 @@ void MainWindow::LoadConfigToUI()
     m_encoderSpeed = cfg.encoderSpeed;
     m_gpuIndex     = cfg.gpuIndex;
     m_containerFormat = cfg.containerFormat;
+    m_audioEnabled    = cfg.audioEnabled;
+    m_audioBitrate    = cfg.audioBitrate;
+    m_audioEnabledBool = m_audioEnabled != 0;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -846,4 +879,6 @@ void MainWindow::SaveUIToConfig()
     cfg.encoderSpeed = m_encoderSpeed;
     cfg.gpuIndex     = m_gpuIndex;
     cfg.containerFormat = m_containerFormat;
+    cfg.audioEnabled    = m_audioEnabled;
+    cfg.audioBitrate    = m_audioBitrate;
 }

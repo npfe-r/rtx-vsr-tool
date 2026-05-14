@@ -318,6 +318,8 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.speed         = m_cfg.encoderSpeed;
         encCfg.container     = m_cfg.container;
         encCfg.hasAudio      = info.hasAudio;
+        encCfg.audioEnabled  = m_cfg.audioEnabled;
+        encCfg.audioBitrate  = m_cfg.audioBitrate;
         encCfg.audioStreamIdx = info.audioStreamIndex;
         encCfg.audioSampleRate = info.audioSampleRate;
         encCfg.audioChannels = info.audioChannels;
