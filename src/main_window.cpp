@@ -441,7 +441,7 @@ void MainWindow::RenderUI()
     // --- GPU row ---
     ImGui::Text("GPU");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(350);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     {
         EnumGpus();
@@ -459,7 +459,7 @@ void MainWindow::RenderUI()
     // --- Quality ---
     ImGui::Text("质量");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* qualityNames[] = { "双三次", "低质量", "中等", "高质量", "极致" };
     if (ImGui::Combo("##quality", &m_qualityLevel, qualityNames, 5))
@@ -470,7 +470,7 @@ void MainWindow::RenderUI()
     // --- Output Size ---
     ImGui::Text("输出尺寸");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(90);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* outputModes[] = { "2倍", "4倍", "自定义" };
     if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
@@ -481,7 +481,7 @@ void MainWindow::RenderUI()
     // --- Resolution ---
     ImGui::Text("分辨率");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(70);
+    ImGui::PushItemWidth(120);
     bool disableRes = (m_outputMode != 2) || m_isRunning;
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##w", &m_outputWidth);
@@ -490,7 +490,7 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::Text("x");
     ImGui::SameLine();
-    ImGui::PushItemWidth(70);
+    ImGui::PushItemWidth(120);
     if (disableRes) ImGui::BeginDisabled();
     ImGui::InputInt("##h", &m_outputHeight);
     if (disableRes) ImGui::EndDisabled();
@@ -499,7 +499,7 @@ void MainWindow::RenderUI()
     // --- Output FPS ---
     ImGui::Text("输出FPS");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(80);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
         m_config.Get().outputFps = m_outputFps;
@@ -511,7 +511,7 @@ void MainWindow::RenderUI()
     // --- Encoder ---
     ImGui::Text("编码器");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(130);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* encoderNames[] = {
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
@@ -525,7 +525,7 @@ void MainWindow::RenderUI()
     // --- CRF ---
     ImGui::Text("CRF");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(200);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
         m_config.Get().crf = m_crf;
@@ -537,7 +537,7 @@ void MainWindow::RenderUI()
     // --- Speed ---
     ImGui::Text("编码速度");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(90);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
     if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
@@ -548,7 +548,7 @@ void MainWindow::RenderUI()
     // --- Container ---
     ImGui::Text("封装格式");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(70);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* containerNames[] = { "MP4", "MKV", "MOV" };
     if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
@@ -559,7 +559,7 @@ void MainWindow::RenderUI()
     // --- Audio + Bitrate ---
     ImGui::Text("音频");
     ImGui::SameLine(80);
-    ImGui::PushItemWidth(100);
+    ImGui::PushItemWidth(250);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* audioModes[] = { "无音频", "复制源", "AAC编码" };
     if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3)) {
@@ -572,7 +572,7 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::Text("码率");
         ImGui::SameLine();
-        ImGui::PushItemWidth(80);
+        ImGui::PushItemWidth(250);
         if (m_isRunning) ImGui::BeginDisabled();
         static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
         static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
