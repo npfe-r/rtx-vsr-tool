@@ -162,11 +162,24 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.IniFilename = nullptr;
 
-    // Load Chinese-capable font (Microsoft YaHei)
+    // Load Chinese-capable font with fallback paths
     ImFontConfig fontCfg;
     fontCfg.SizePixels = 16.0f;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\msyh.ttc", 16.0f, &fontCfg,
-                                 io.Fonts->GetGlyphRangesChineseFull());
+    const wchar_t* fontPaths[] = {
+        L"C:\\Windows\\Fonts\\msyh.ttc",
+        L"C:\\Windows\\Fonts\\msyhbd.ttc",
+        L"C:\\Windows\\Fonts\\simhei.ttf",
+        L"C:\\Windows\\Fonts\\yahei.ttf",
+    };
+    ImFont* font = nullptr;
+    for (auto* fp : fontPaths) {
+        font = io.Fonts->AddFontFromFileTTF(
+            (const char*)fp, 16.0f, &fontCfg,
+            io.Fonts->GetGlyphRangesChineseFull());
+        if (font) break;
+    }
+    if (!font)
+        io.Fonts->AddFontDefault();
 
     ImGui::StyleColorsDark();
 
@@ -499,8 +512,8 @@ void MainWindow::RenderUI()
     ImGui::SameLine(80);
     ImGui::PushItemWidth(90);
     if (m_isRunning) ImGui::BeginDisabled();
-    static const char* speedNames[] = { "快", "中", "慢" };
-    if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 3))
+    static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
+    if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
         m_config.Get().encoderSpeed = m_encoderSpeed;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
@@ -508,11 +521,30 @@ void MainWindow::RenderUI()
     ImGui::SameLine();
     ImGui::Text("GPU");
     ImGui::SameLine();
-    ImGui::PushItemWidth(90);
+    ImGui::PushItemWidth(210);
     if (m_isRunning) ImGui::BeginDisabled();
-    static const char* gpuNames[] = { "GPU 0" };
-    if (ImGui::Combo("##gpu", &m_gpuIndex, gpuNames, 1))
-        m_config.Get().gpuIndex = m_gpuIndex;
+    {
+        // Build dynamic GPU name list for ImGui
+        EnumGpus();
+        std::vector<const char*> gpuPtrs;
+        for (const auto& n : m_gpuNames)
+            gpuPtrs.push_back(n.c_str());
+        if (m_gpuIndex >= (int)gpuPtrs.size())
+            m_gpuIndex = 0;
+        if (ImGui::Combo("##gpu", &m_gpuIndex, gpuPtrs.data(), (int)gpuPtrs.size()))
+            m_config.Get().gpuIndex = m_gpuIndex;
+    }
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
+    ImGui::Text("封装");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(60);
+    if (m_isRunning) ImGui::BeginDisabled();
+    static const char* containerNames[] = { "MP4", "MKV", "MOV" };
+    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
+        m_config.Get().containerFormat = m_containerFormat;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -612,7 +644,13 @@ void MainWindow::OnSelectInput()
         wchar_t outPath[MAX_PATH];
         wcscpy(outPath, path);
         wchar_t* dot = wcsrchr(outPath, L'.');
-        if (dot) wcscpy(dot, L"_VSR.mp4");
+        if (dot) {
+            static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mkv", L"_VSR.mov" };
+            int idx = m_containerFormat;
+            if (idx < 0) idx = 0;
+            if (idx > 2) idx = 0;
+            wcscpy(dot, containerExt[idx]);
+        }
         narrow(outPath, m_outputPath, sizeof(m_outputPath));
         wcscpy(m_config.Get().lastOutputPath, outPath);
     }
@@ -670,7 +708,7 @@ void MainWindow::OnStartStop()
         pc.crf          = m_crf;
         pc.encoderSpeed = m_encoderSpeed;
         pc.gpuIndex     = m_gpuIndex;
-        pc.container    = 0;
+        pc.container    = m_containerFormat;
         pc.outputFps    = 0;
 
         cfg.qualityLevel = m_qualityLevel;
@@ -737,6 +775,34 @@ void MainWindow::OnPipelineCompleted()
 }
 
 // ============================================================================
+// GPU enumeration
+// ============================================================================
+
+void MainWindow::EnumGpus()
+{
+    m_gpuNames.clear();
+    int count = 0;
+    cudaError_t err = cudaGetDeviceCount(&count);
+    if (err != cudaSuccess || count <= 0) {
+        m_gpuNames.push_back("GPU 0 (default)");
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, i) == cudaSuccess) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "GPU %d: %s (%d MB)",
+                     i, prop.name, (int)(prop.totalGlobalMem / (1024 * 1024)));
+            m_gpuNames.push_back(buf);
+        } else {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "GPU %d", i);
+            m_gpuNames.push_back(buf);
+        }
+    }
+}
+
+// ============================================================================
 // Config UI synchronisation
 // ============================================================================
 
@@ -754,6 +820,7 @@ void MainWindow::LoadConfigToUI()
     m_crf          = cfg.crf;
     m_encoderSpeed = cfg.encoderSpeed;
     m_gpuIndex     = cfg.gpuIndex;
+    m_containerFormat = cfg.containerFormat;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -778,4 +845,5 @@ void MainWindow::SaveUIToConfig()
     cfg.crf          = m_crf;
     cfg.encoderSpeed = m_encoderSpeed;
     cfg.gpuIndex     = m_gpuIndex;
+    cfg.containerFormat = m_containerFormat;
 }

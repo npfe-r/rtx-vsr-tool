@@ -65,6 +65,7 @@ private:
     int     m_crf              = 18;
     int     m_encoderSpeed     = 2;
     int     m_gpuIndex         = 0;
+    int     m_containerFormat  = 0;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]  = {};
 
