@@ -157,48 +157,47 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
     avcodec_parameters_from_context(m->videoStream->codecpar, m->encCtx);
     m->videoStream->time_base = m->encCtx->time_base;
 
-    // Audio stream setup (transcode to AAC for maximum compatibility)
-    if (cfg.hasAudio && cfg.audioEnabled && cfg.audioPackets && cfg.audioStreamIdx >= 0 && cfg.audioCodecPar) {
+    // Audio stream: copy source or transcode to AAC
+    if (cfg.hasAudio && cfg.audioMode > 0 && cfg.audioPackets && cfg.audioStreamIdx >= 0 && cfg.audioCodecPar) {
         m->audioPackets = static_cast<std::vector<AVPacket*>*>(cfg.audioPackets);
         AVCodecParameters* srcPar = static_cast<AVCodecParameters*>(cfg.audioCodecPar);
 
-        // Create source audio decoder
-        const AVCodec* decCodec = avcodec_find_decoder(srcPar->codec_id);
-        if (decCodec) {
-            m->audioDecCtx = avcodec_alloc_context3(decCodec);
-            if (avcodec_parameters_to_context(m->audioDecCtx, srcPar) >= 0 &&
-                avcodec_open2(m->audioDecCtx, decCodec, NULL) >= 0) {
+        if (cfg.audioMode == 2) {
+            // AAC transcode
+            const AVCodec* decCodec = avcodec_find_decoder(srcPar->codec_id);
+            if (decCodec) {
+                m->audioDecCtx = avcodec_alloc_context3(decCodec);
+                if (avcodec_parameters_to_context(m->audioDecCtx, srcPar) >= 0 &&
+                    avcodec_open2(m->audioDecCtx, decCodec, NULL) >= 0) {
 
-                // Create AAC encoder
-                const AVCodec* encCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
-                if (encCodec) {
-                    m->audioEncCtx = avcodec_alloc_context3(encCodec);
-                    m->audioEncCtx->sample_rate = m->audioDecCtx->sample_rate;
-                    m->audioEncCtx->ch_layout   = m->audioDecCtx->ch_layout;
-                    m->audioEncCtx->sample_fmt  = AV_SAMPLE_FMT_FLTP;
-                    m->audioEncCtx->bit_rate    = cfg.audioBitrate * 1000;
+                    const AVCodec* encCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+                    if (encCodec) {
+                        m->audioEncCtx = avcodec_alloc_context3(encCodec);
+                        m->audioEncCtx->sample_rate = m->audioDecCtx->sample_rate;
+                        m->audioEncCtx->ch_layout   = m->audioDecCtx->ch_layout;
+                        m->audioEncCtx->sample_fmt  = AV_SAMPLE_FMT_FLTP;
+                        m->audioEncCtx->bit_rate    = cfg.audioBitrate * 1000;
 
-                    if (avcodec_open2(m->audioEncCtx, encCodec, NULL) >= 0) {
-                        // Create resampler for format conversion
-                        m->audioSwr = swr_alloc();
-                        av_opt_set_chlayout(m->audioSwr, "in_chlayout",  &m->audioDecCtx->ch_layout, 0);
-                        av_opt_set_int(m->audioSwr, "in_sample_rate",     m->audioDecCtx->sample_rate, 0);
-                        av_opt_set_sample_fmt(m->audioSwr, "in_sample_fmt", m->audioDecCtx->sample_fmt, 0);
-                        av_opt_set_chlayout(m->audioSwr, "out_chlayout", &m->audioEncCtx->ch_layout, 0);
-                        av_opt_set_int(m->audioSwr, "out_sample_rate",    m->audioEncCtx->sample_rate, 0);
-                        av_opt_set_sample_fmt(m->audioSwr, "out_sample_fmt", m->audioEncCtx->sample_fmt, 0);
-                        if (m->audioSwr && swr_init(m->audioSwr) >= 0) {
-                            m->audioFrame = av_frame_alloc();
-                            m->audioEncFrame = av_frame_alloc();
-                            m->audioEncFrame->format     = m->audioEncCtx->sample_fmt;
-                            m->audioEncFrame->ch_layout  = m->audioEncCtx->ch_layout;
-                            m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+                        if (avcodec_open2(m->audioEncCtx, encCodec, NULL) >= 0) {
+                            m->audioSwr = swr_alloc();
+                            av_opt_set_chlayout(m->audioSwr, "in_chlayout",  &m->audioDecCtx->ch_layout, 0);
+                            av_opt_set_int(m->audioSwr, "in_sample_rate",     m->audioDecCtx->sample_rate, 0);
+                            av_opt_set_sample_fmt(m->audioSwr, "in_sample_fmt", m->audioDecCtx->sample_fmt, 0);
+                            av_opt_set_chlayout(m->audioSwr, "out_chlayout", &m->audioEncCtx->ch_layout, 0);
+                            av_opt_set_int(m->audioSwr, "out_sample_rate",    m->audioEncCtx->sample_rate, 0);
+                            av_opt_set_sample_fmt(m->audioSwr, "out_sample_fmt", m->audioEncCtx->sample_fmt, 0);
+                            if (swr_init(m->audioSwr) >= 0) {
+                                m->audioFrame = av_frame_alloc();
+                                m->audioEncFrame = av_frame_alloc();
+                                m->audioEncFrame->format     = m->audioEncCtx->sample_fmt;
+                                m->audioEncFrame->ch_layout  = m->audioEncCtx->ch_layout;
+                                m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
 
-                            // Create audio output stream
-                            m->audioStream = avformat_new_stream(m->fmtCtx, NULL);
-                            avcodec_parameters_from_context(m->audioStream->codecpar, m->audioEncCtx);
-                            AVRational audio_tb = { 1, m->audioEncCtx->sample_rate };
-                            m->audioStream->time_base = audio_tb;
+                                m->audioStream = avformat_new_stream(m->fmtCtx, NULL);
+                                avcodec_parameters_from_context(m->audioStream->codecpar, m->audioEncCtx);
+                                AVRational audio_tb = { 1, m->audioEncCtx->sample_rate };
+                                m->audioStream->time_base = audio_tb;
+                            }
                             m->audioTranscoding = true;
                         }
                     }
@@ -206,7 +205,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg) {
             }
         }
 
-        // Fallback: remux (if transcode setup failed, try direct remux)
+        // Copy source (mode 1) or fallback for mode 2 if transcode failed
         if (!m->audioTranscoding) {
             m->audioStream = avformat_new_stream(m->fmtCtx, NULL);
             avcodec_parameters_copy(m->audioStream->codecpar, srcPar);

@@ -40,7 +40,7 @@ struct PipelineConfig {
     int gpuIndex = 0;
     int container = 0;
     int outputFps = 0;
-    int audioEnabled = 1;
+    int audioMode = 2;
     int audioBitrate = 128;
 };
 

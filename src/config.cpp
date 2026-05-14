@@ -34,7 +34,7 @@ void Config::Load() {
     m_config.gpuIndex     = r(L"Params", L"GPU", 0);
     m_config.containerFormat = r(L"Params", L"Container", 0);
     m_config.outputFps    = r(L"Params", L"OutputFps", 0);
-    m_config.audioEnabled = r(L"Params", L"AudioEnabled", 1);
+    m_config.audioMode = r(L"Params", L"AudioMode", 2);
     m_config.audioBitrate = r(L"Params", L"AudioBitrate", 128);
 
     rs(L"Paths", L"Input",  m_config.lastInputPath,  L"");
@@ -61,7 +61,7 @@ void Config::Save() {
     w(L"Params", L"GPU",       m_config.gpuIndex);
     w(L"Params", L"Container", m_config.containerFormat);
     w(L"Params", L"OutputFps", m_config.outputFps);
-    w(L"Params", L"AudioEnabled", m_config.audioEnabled);
+    w(L"Params", L"AudioMode", m_config.audioMode);
     w(L"Params", L"AudioBitrate", m_config.audioBitrate);
 
     WritePrivateProfileStringW(L"Paths", L"Input",  m_config.lastInputPath,  path.c_str());

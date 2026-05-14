@@ -66,9 +66,8 @@ private:
     int     m_encoderSpeed     = 2;
     int     m_gpuIndex         = 0;
     int     m_containerFormat  = 0;
-    int     m_audioEnabled     = 1;
+    int     m_audioMode        = 2;
     int     m_audioBitrate     = 128;
-    bool    m_audioEnabledBool = true;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]  = {};
 

@@ -549,14 +549,18 @@ void MainWindow::RenderUI()
     ImGui::PopItemWidth();
 
     ImGui::SameLine();
+    ImGui::Text("音频");
+    ImGui::SameLine();
+    ImGui::PushItemWidth(90);
     if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::Checkbox("音频", &m_audioEnabledBool)) {
-        m_audioEnabled = m_audioEnabledBool ? 1 : 0;
-        m_config.Get().audioEnabled = m_audioEnabled;
+    static const char* audioModes[] = { "无音频", "复制源", "AAC编码" };
+    if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3)) {
+        m_config.Get().audioMode = m_audioMode;
     }
     if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
 
-    if (m_audioEnabledBool) {
+    if (m_audioMode == 2) {
         ImGui::SameLine();
         ImGui::Text("码率");
         ImGui::SameLine();
@@ -737,7 +741,7 @@ void MainWindow::OnStartStop()
         pc.encoderSpeed = m_encoderSpeed;
         pc.gpuIndex     = m_gpuIndex;
         pc.container    = m_containerFormat;
-        pc.audioEnabled = m_audioEnabled;
+        pc.audioMode = m_audioMode;
         pc.audioBitrate = m_audioBitrate;
         pc.outputFps    = 0;
 
@@ -851,9 +855,8 @@ void MainWindow::LoadConfigToUI()
     m_encoderSpeed = cfg.encoderSpeed;
     m_gpuIndex     = cfg.gpuIndex;
     m_containerFormat = cfg.containerFormat;
-    m_audioEnabled    = cfg.audioEnabled;
+    m_audioMode    = cfg.audioMode;
     m_audioBitrate    = cfg.audioBitrate;
-    m_audioEnabledBool = m_audioEnabled != 0;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -879,6 +882,6 @@ void MainWindow::SaveUIToConfig()
     cfg.encoderSpeed = m_encoderSpeed;
     cfg.gpuIndex     = m_gpuIndex;
     cfg.containerFormat = m_containerFormat;
-    cfg.audioEnabled    = m_audioEnabled;
+    cfg.audioMode    = m_audioMode;
     cfg.audioBitrate    = m_audioBitrate;
 }
