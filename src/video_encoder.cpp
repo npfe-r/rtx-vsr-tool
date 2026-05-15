@@ -428,6 +428,14 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
     return true;
 }
 
+bool VideoEncoder::GetFrameBuffer(uint8_t**, int*, uint8_t**, int*) {
+    return false;
+}
+
+bool VideoEncoder::SubmitFrame() {
+    return true;
+}
+
 void VideoEncoder::Close() {
     if (m->encCtx && m->videoStream && m->fmtCtx && m->fmtCtx->pb && !m->encCtxFailed) {
         __try {

@@ -277,6 +277,7 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             snprintf(m_statusText, sizeof(m_statusText),
                      "帧 %d/%d  |  FPS: %.1f  |  剩余: %.0fs",
                      p->currentFrame, p->totalFrames, p->fps, p->etaSeconds);
+            strncpy(m_decodeMode, p->decodeMode, sizeof(m_decodeMode) - 1);
             delete p;
         }
         return 0;
@@ -750,8 +751,8 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
-    static const char* containerNames[] = { "MP4", "MOV" };
-    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 2))
+    static const char* containerNames[] = { "MP4", "MKV", "MOV" };
+    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
         m_config.Get().containerFormat = m_containerFormat;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
@@ -817,6 +818,15 @@ void MainWindow::RenderUI()
         float tw = ImGui::CalcTextSize(status).x;
         ImGui::SetCursorPos(ImVec2((winW - tw) * 0.5f, 32));
         ImGui::Text("%s", status);
+
+        if (m_decodeMode[0]) {
+            char modeBuf[32];
+            snprintf(modeBuf, sizeof(modeBuf), "[%s]", m_decodeMode);
+            float mw = ImGui::CalcTextSize(modeBuf).x;
+            ImGui::SameLine();
+            ImGui::SetCursorPos(ImVec2(winW - mw - 14, 32));
+            ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1), "%s", modeBuf);
+        }
     }
 
     // Buttons
@@ -926,10 +936,10 @@ void MainWindow::OnSelectInput()
         wcscpy(outPath, path);
         wchar_t* dot = wcsrchr(outPath, L'.');
         if (dot) {
-            static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mov" };
+            static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mkv", L"_VSR.mov" };
             int idx = m_containerFormat;
             if (idx < 0) idx = 0;
-            if (idx > 1) idx = 0;
+            if (idx > 2) idx = 0;
             wcscpy(dot, containerExt[idx]);
         }
         narrow(outPath, m_outputPath, sizeof(m_outputPath));
@@ -950,7 +960,7 @@ void MainWindow::OnSelectOutput()
 
     OPENFILENAMEW ofn = { sizeof(ofn), m_hWnd, m_hInst };
     ofn.lpstrInitialDir = exeDir;
-    ofn.lpstrFilter = L"MP4\0*.mp4\0MOV\0*.mov\0"
+    ofn.lpstrFilter = L"MP4\0*.mp4\0MKV\0*.mkv\0MOV\0*.mov\0"
                       L"所有文件\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile  = MAX_PATH;

@@ -40,6 +40,11 @@ public:
     void Close();
     bool IsOpen() const;
 
+    // GPU zero-copy: get writable encoder frame buffer (CUDA pinned, device-accessible)
+    // After GPU writes NV12 data into the buffer, call SubmitFrame() to encode
+    bool GetFrameBuffer(uint8_t** y, int* yPitch, uint8_t** uv, int* uvPitch);
+    bool SubmitFrame();
+
 private:
     struct Impl;
     Impl* m;

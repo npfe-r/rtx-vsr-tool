@@ -50,6 +50,7 @@ struct PipelineProgress {
     float fps = 0.0f;
     float avgMsPerFrame = 0.0f;
     float etaSeconds = 0.0f;
+    char decodeMode[16] = {};
 };
 
 enum class PipelineState {
@@ -124,4 +125,5 @@ private:
     std::mutex m_pauseMutex;
     std::condition_variable m_pauseCv;
     PipelineConfig m_cfg;
+    char m_decodeMode[16] = {};
 };

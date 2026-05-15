@@ -268,8 +268,10 @@ void PipelineController::ThreadFuncImpl() {
     LogStatus(onStatus, "解码器打开成功");
     if (m_decoder.IsHWDecoding()) {
         LogStatus(onStatus, "GPU 硬件解码已启用 (NVDEC)");
+        strncpy(m_decodeMode, "GPU", sizeof(m_decodeMode) - 1);
     } else {
         LogStatus(onStatus, "GPU 解码不可用，自动回退到 CPU 解码");
+        strncpy(m_decodeMode, "CPU", sizeof(m_decodeMode) - 1);
     }
 
     m_srcW = info.width;
@@ -455,7 +457,7 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
-        // RGBA→NV12 kernel + D2H copy on per-slot stream
+        // RGBA→NV12 + D2H on per-slot stream
         launch_rgba_to_nv12(
             slot.d_rgba_dst, m_dstW * 4,
             slot.d_nv12_out, m_dstW,
@@ -494,6 +496,7 @@ void PipelineController::ThreadFuncImpl() {
             p.fps            = 1000.0f / ms;
             p.avgMsPerFrame  = ms;
             p.etaSeconds     = (m_totalFrames - encoded) * ms / 1000.0f;
+            strncpy(p.decodeMode, m_decodeMode, sizeof(p.decodeMode) - 1);
             onProgress(p);
         }
         lastReport = now;
