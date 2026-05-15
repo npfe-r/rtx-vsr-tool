@@ -6,9 +6,11 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/avassert.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 }
 
 #include <cstdio>
+#include <thread>
 #include <windows.h>
 
 static void EncLog(const char* msg) {
@@ -54,6 +56,8 @@ struct VideoEncoder::Impl {
     AVFrame*        audioEncFrame = nullptr; // resampled frame for encoder
     SwrContext*     audioSwr = nullptr;
     bool            audioTranscoding = false;
+
+    SwsContext*     swsCtx = nullptr;
 };
 
 static const char* GetEncoderName(int id) {
@@ -230,13 +234,28 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             char crfStr[8];
             snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
             av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
-            const char* swPresets[] = {
-                "ultrafast", "superfast", "veryfast", "medium", "veryslow"
-            };
-            int idx = cfg.speed;
-            if (idx < 0) idx = 0;
-            if (idx > 4) idx = 4;
-            av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
+
+            int cpuUsed = 0;
+            const char* usage = "good";
+            switch (cfg.speed) {
+                case 0: cpuUsed = 6; usage = "realtime"; break;
+                case 1: cpuUsed = 5; usage = "realtime"; break;
+                case 2: cpuUsed = 3; usage = "good";     break;
+                case 3: cpuUsed = 1; usage = "good";     break;
+                case 4: cpuUsed = 0; usage = "good";     break;
+            }
+
+            m->encCtx->thread_count = (int)std::thread::hardware_concurrency();
+            av_opt_set_int(m->encCtx->priv_data, "cpu-used", cpuUsed, 0);
+            av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
+            av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
+            av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
+
+            int tileCols = 0, tileRows = 0;
+            if (cfg.width >= 3840) tileCols = 1;
+            if (cfg.height >= 2160) tileRows = 1;
+            av_opt_set_int(m->encCtx->priv_data, "tile-columns", tileCols, 0);
+            av_opt_set_int(m->encCtx->priv_data, "tile-rows", tileRows, 0);
         }
 
         { char _b[256]; snprintf(_b, sizeof(_b), "avcodec_open2(%s)...", tryName); EncLog(_b); }
@@ -271,6 +290,14 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
     avcodec_parameters_from_context(m->videoStream->codecpar, m->encCtx);
     m->videoStream->time_base = m->encCtx->time_base;
+
+    // Initialize swscale for NV12→YUV420P conversion (software encoders only)
+    if (m->pixFmt == AV_PIX_FMT_YUV420P) {
+        m->swsCtx = sws_getContext(
+            cfg.width, cfg.height, AV_PIX_FMT_NV12,
+            cfg.width, cfg.height, AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR, NULL, NULL, NULL);
+    }
 
     // Audio stream: copy source or transcode to AAC
     if (cfg.hasAudio && cfg.audioMode > 0 && cfg.audioPackets && cfg.audioStreamIdx >= 0 && cfg.audioCodecPar) {
@@ -368,27 +395,20 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride) {
     if (!m->frame || !m->encCtx) return false;
 
-    // Copy Y plane line by line (handles pitch != width)
-    uint8_t* yDst = m->frame->data[0];
-    int yLineSize = m->encCtx->width;
-    for (int y = 0; y < m->encCtx->height; y++)
-        memcpy(yDst + y * m->frame->linesize[0], data + y * yStride, yLineSize);
-
-    if (m->pixFmt == AV_PIX_FMT_YUV420P) {
-        // Convert NV12 → YUV420P: deinterleave UV into separate U/V planes
-        int w2 = m->encCtx->width / 2;
-        int h2 = m->encCtx->height / 2;
-        for (int y = 0; y < h2; y++) {
-            const uint8_t* uvSrc = data + yStride * m->encCtx->height + y * uvStride;
-            uint8_t* uDst = m->frame->data[1] + y * m->frame->linesize[1];
-            uint8_t* vDst = m->frame->data[2] + y * m->frame->linesize[2];
-            for (int x = 0; x < w2; x++) {
-                uDst[x] = uvSrc[x * 2];
-                vDst[x] = uvSrc[x * 2 + 1];
-            }
-        }
+    if (m->pixFmt == AV_PIX_FMT_YUV420P && m->swsCtx) {
+        uint8_t* srcData[2] = {
+            const_cast<uint8_t*>(data),
+            const_cast<uint8_t*>(data + yStride * m->encCtx->height)
+        };
+        int srcLinesizes[2] = { yStride, uvStride };
+        sws_scale(m->swsCtx, srcData, srcLinesizes, 0, m->encCtx->height,
+                  m->frame->data, m->frame->linesize);
     } else {
-        // NV12: copy UV plane as-is
+        uint8_t* yDst = m->frame->data[0];
+        int yLineSize = m->encCtx->width;
+        for (int y = 0; y < m->encCtx->height; y++)
+            memcpy(yDst + y * m->frame->linesize[0], data + y * yStride, yLineSize);
+
         uint8_t* uvDst = m->frame->data[1];
         int uvLineSize = m->encCtx->width;
         int uvHeight = m->encCtx->height / 2;
@@ -527,6 +547,7 @@ void VideoEncoder::Close() {
     if (m->audioFrame)    { av_frame_free(&m->audioFrame); m->audioFrame = nullptr; }
     if (m->audioEncFrame) { av_frame_free(&m->audioEncFrame); m->audioEncFrame = nullptr; }
     if (m->audioSwr)      { swr_free(&m->audioSwr); m->audioSwr = nullptr; }
+    if (m->swsCtx)        { sws_freeContext(m->swsCtx); m->swsCtx = nullptr; }
 
     m->frameCount = 0;
     m->encCtxFailed = false;
