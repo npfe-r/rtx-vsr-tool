@@ -38,6 +38,7 @@ struct VideoEncoder::Impl {
     AVCodecContext*  encCtx  = nullptr;
     AVStream*        videoStream = nullptr;
     AVFrame*         frame   = nullptr;
+    AVPixelFormat    pixFmt  = AV_PIX_FMT_NV12;
     int frameCount = 0;
 
     // Audio remux (fallback)
@@ -66,6 +67,22 @@ static const char* GetEncoderName(int id) {
     }
 }
 
+static bool IsNVENCByName(const char* name) {
+    return strcmp(name, "h264_nvenc") == 0 ||
+           strcmp(name, "hevc_nvenc") == 0 ||
+           strcmp(name, "av1_nvenc") == 0;
+}
+
+static const char* GetDisplayName(const char* name) {
+    if (strcmp(name, "h264_nvenc") == 0) return "H.264 NVENC";
+    if (strcmp(name, "hevc_nvenc") == 0) return "HEVC NVENC";
+    if (strcmp(name, "av1_nvenc") == 0) return "AV1 NVENC";
+    if (strcmp(name, "libx264") == 0) return "libx264";
+    if (strcmp(name, "libx265") == 0) return "libx265";
+    if (strcmp(name, "libaom-av1") == 0) return "libaom-av1";
+    return name;
+}
+
 static const char* GetContainerExt(int container) {
     switch (container) {
         case 0: return "mp4";
@@ -85,22 +102,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     { char _b[256]; snprintf(_b, sizeof(_b), "Open encoder: codecId=%d width=%d height=%d fps=%.1f crf=%d speed=%d container=%d",
         cfg.codecId, cfg.width, cfg.height, cfg.fps, cfg.crf, cfg.speed, cfg.container); EncLog(_b); }
 
-    static const char* encoderDisplayNames[] = {
-        "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
-        "libx264", "libx265", "libaom-av1"
-    };
+    const char* userDisplayName = GetDisplayName(GetEncoderName(cfg.codecId));
 
     // Build ordered fallback list for this codecId.
     // Start with the user's choice, then try encoders with better resolution support,
     // and finally fall back to software.
     const char* fallbackNames[5];
     int fallbackCount = 0;
-    bool isNVENC = false;
     {
         // codecId 0=h264_nvenc, 1=hevc_nvenc, 2=av1_nvenc, 3=libx264, 4=libx265, 5=libaom-av1
-        const char* name = GetEncoderName(cfg.codecId);
         if (cfg.codecId <= 2) {
-            // NVENC chain: try user's choice, then higher-capability NVENC, then software fallbacks
             if (cfg.codecId == 0) {
                 fallbackNames[0] = "h264_nvenc";
                 fallbackNames[1] = "hevc_nvenc";
@@ -121,15 +132,13 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
                 fallbackCount = 3;
             }
         } else {
-            // Software only — single try
-            fallbackNames[0] = name;
+            fallbackNames[0] = GetEncoderName(cfg.codecId);
             fallbackCount = 1;
         }
     }
 
     const AVCodec* codec = nullptr;
     const char* chosenName = nullptr;
-    int chosenIndex = -1;
 
     for (int i = 0; i < fallbackCount; i++) {
         const char* tryName = fallbackNames[i];
@@ -145,14 +154,12 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         if (statusCb) {
             char msg[128];
             snprintf(msg, sizeof(msg), i > 0 ? "编码器: 尝试降级到 %s..." : "编码器: 打开 %s...",
-                     encoderDisplayNames[i <= 2 ? (cfg.codecId <= 2 ? i : 3 + (cfg.codecId - 3)) : (i >= 3 ? i : i)]);
+                     GetDisplayName(tryName));
             statusCb(msg);
         }
 
-        isNVENC = (i <= 2 && cfg.codecId <= 2);
-
-        // Allocate output context on first successful codec find
-        if (chosenIndex < 0) {
+        // Allocate output context on first iteration
+        if (i == 0) {
             const char* ext = GetContainerExt(cfg.container);
             { char _b[256]; snprintf(_b, sizeof(_b), "Alloc output context, format=%s", ext); EncLog(_b); }
             avformat_alloc_output_context2(&m->fmtCtx, NULL, ext, NULL);
@@ -167,10 +174,14 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         AVRational fpsRat = av_d2q(cfg.fps, 1001);
         m->encCtx->time_base = av_inv_q(fpsRat);
         m->encCtx->framerate = fpsRat;
-        m->encCtx->pix_fmt   = AV_PIX_FMT_NV12;
+        m->encCtx->pix_fmt   = m->pixFmt = IsNVENCByName(tryName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+        m->encCtx->color_range = AVCOL_RANGE_MPEG;
+        m->encCtx->color_primaries = AVCOL_PRI_BT709;
+        m->encCtx->color_trc = AVCOL_TRC_BT709;
+        m->encCtx->colorspace = AVCOL_SPC_BT709;
+        m->encCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
 
-        // NVENC settings
-        if (isNVENC) {
+        if (IsNVENCByName(tryName)) {
             const char* nvPresets[] = { "p1", "p3", "p4", "p6", "p7" };
             int idx = cfg.speed;
             if (idx < 0) idx = 0;
@@ -179,9 +190,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             av_opt_set_int(m->encCtx->priv_data, "cq", cfg.crf, 0);
             av_opt_set(m->encCtx->priv_data, "rc", "vbr", 0);
             av_opt_set_int(m->encCtx->priv_data, "b", 0, 0);
-        }
-        // Software encoder settings
-        else {
+        } else {
             char crfStr[8];
             snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
             av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
@@ -199,11 +208,9 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         if (ret >= 0) {
             EncLog("avcodec_open2 OK");
             chosenName = tryName;
-            chosenIndex = i;
             if (statusCb) {
                 char msg[128];
-                snprintf(msg, sizeof(msg), "编码器: %s 打开成功",
-                         encoderDisplayNames[i <= 2 ? (cfg.codecId <= 2 ? i : i) : (i >= 3 ? i : i)]);
+                snprintf(msg, sizeof(msg), "编码器: %s 打开成功", GetDisplayName(tryName));
                 statusCb(msg);
             }
             break;
@@ -213,8 +220,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         { char _b[256]; snprintf(_b, sizeof(_b), "avcodec_open2 failed: %s (%d)", err, ret); EncLog(_b); }
         if (statusCb) {
             char msg[128];
-            snprintf(msg, sizeof(msg), "编码器: %s 不支持此分辨率，尝试其他编码器",
-                     encoderDisplayNames[cfg.codecId <= 2 ? cfg.codecId : cfg.codecId - 3]);
+            snprintf(msg, sizeof(msg), "编码器: %s 不支持此分辨率，尝试其他编码器", userDisplayName);
             statusCb(msg);
         }
         avcodec_free_context(&m->encCtx);
@@ -301,12 +307,15 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
     avformat_write_header(m->fmtCtx, NULL);
 
-    // Allocate frame for NV12 encoding
+    // Allocate frame for encoding
     m->frame = av_frame_alloc();
     m->frame->width  = cfg.width;
     m->frame->height = cfg.height;
-    m->frame->format = AV_PIX_FMT_NV12;
-    av_frame_get_buffer(m->frame, 0);
+    m->frame->format = m->pixFmt;
+    if (av_frame_get_buffer(m->frame, 0) < 0) {
+        EncLog("av_frame_get_buffer failed");
+        return false;
+    }
 
     return true;
 }
@@ -320,32 +329,58 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
     for (int y = 0; y < m->encCtx->height; y++)
         memcpy(yDst + y * m->frame->linesize[0], data + y * yStride, yLineSize);
 
-    // Copy UV plane
-    uint8_t* uvDst = m->frame->data[1];
-    int uvLineSize = m->encCtx->width;
-    int uvHeight = m->encCtx->height / 2;
-    for (int y = 0; y < uvHeight; y++)
-        memcpy(uvDst + y * m->frame->linesize[1],
-               data + yStride * m->encCtx->height + y * uvStride, uvLineSize);
+    if (m->pixFmt == AV_PIX_FMT_YUV420P) {
+        // Convert NV12 → YUV420P: deinterleave UV into separate U/V planes
+        int w2 = m->encCtx->width / 2;
+        int h2 = m->encCtx->height / 2;
+        for (int y = 0; y < h2; y++) {
+            const uint8_t* uvSrc = data + yStride * m->encCtx->height + y * uvStride;
+            uint8_t* uDst = m->frame->data[1] + y * m->frame->linesize[1];
+            uint8_t* vDst = m->frame->data[2] + y * m->frame->linesize[2];
+            for (int x = 0; x < w2; x++) {
+                uDst[x] = uvSrc[x * 2];
+                vDst[x] = uvSrc[x * 2 + 1];
+            }
+        }
+    } else {
+        // NV12: copy UV plane as-is
+        uint8_t* uvDst = m->frame->data[1];
+        int uvLineSize = m->encCtx->width;
+        int uvHeight = m->encCtx->height / 2;
+        for (int y = 0; y < uvHeight; y++)
+            memcpy(uvDst + y * m->frame->linesize[1],
+                   data + yStride * m->encCtx->height + y * uvStride, uvLineSize);
+    }
 
     m->frame->pts = m->frameCount++;
 
-    if (avcodec_send_frame(m->encCtx, m->frame) < 0)
+    __try {
+        if (avcodec_send_frame(m->encCtx, m->frame) < 0)
+            return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        EncLog("SEH in avcodec_send_frame");
         return false;
+    }
 
     AVPacket pkt = { 0 };
-    int ret = avcodec_receive_packet(m->encCtx, &pkt);
-    if (ret >= 0) {
-        av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
-        pkt.stream_index = m->videoStream->index;
-        av_interleaved_write_frame(m->fmtCtx, &pkt);
+    __try {
+        int ret = avcodec_receive_packet(m->encCtx, &pkt);
+        if (ret >= 0) {
+            av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
+            pkt.stream_index = m->videoStream->index;
+            av_interleaved_write_frame(m->fmtCtx, &pkt);
+            av_packet_unref(&pkt);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        EncLog("SEH in avcodec_receive_packet");
         av_packet_unref(&pkt);
+        return false;
     }
     return true;
 }
 
 void VideoEncoder::Close() {
-    if (m->encCtx && m->videoStream) {
+    if (m->encCtx && m->videoStream && m->fmtCtx && m->fmtCtx->pb) {
         avcodec_send_frame(m->encCtx, NULL);
         AVPacket pkt = { 0 };
         while (avcodec_receive_packet(m->encCtx, &pkt) >= 0) {
@@ -356,10 +391,9 @@ void VideoEncoder::Close() {
         }
     }
 
-    // Audio (transcode or remux)
-    if (m->audioStream && m->audioPackets) {
+    // Audio (transcode or remux) - only if fmtCtx was fully opened
+    if (m->fmtCtx && m->fmtCtx->pb && m->audioStream && m->audioPackets) {
         if (m->audioTranscoding) {
-            // Decode source audio → encode AAC → write
             AVPacket* pkt = av_packet_alloc();
             for (AVPacket* apkt : *m->audioPackets) {
                 if (!apkt) continue;
@@ -384,7 +418,6 @@ void VideoEncoder::Close() {
                 }
             }
 
-            // Flush decoder
             avcodec_send_packet(m->audioDecCtx, NULL);
             while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
                 int dstSamples = av_rescale_rnd(
@@ -405,7 +438,6 @@ void VideoEncoder::Close() {
                 }
             }
 
-            // Flush encoder
             avcodec_send_frame(m->audioEncCtx, NULL);
             while (avcodec_receive_packet(m->audioEncCtx, pkt) >= 0) {
                 pkt->stream_index = m->audioStream->index;
@@ -414,7 +446,6 @@ void VideoEncoder::Close() {
             }
             av_packet_free(&pkt);
         } else {
-            // Remux (fallback for compatible codecs)
             for (AVPacket* apkt : *m->audioPackets) {
                 if (apkt) {
                     apkt->stream_index = m->audioStream->index;
@@ -424,22 +455,21 @@ void VideoEncoder::Close() {
         }
     }
 
-    if (m->fmtCtx)
+    if (m->fmtCtx && m->fmtCtx->pb)
         av_write_trailer(m->fmtCtx);
 
     if (m->fmtCtx && m->fmtCtx->pb && !(m->fmtCtx->oformat->flags & AVFMT_NOFILE))
         avio_closep(&m->fmtCtx->pb);
 
-    if (m->frame) av_frame_free(&m->frame);
-    if (m->encCtx) avcodec_free_context(&m->encCtx);
-    if (m->fmtCtx) avformat_free_context(m->fmtCtx);
+    if (m->frame) { av_frame_free(&m->frame); m->frame = nullptr; }
+    if (m->encCtx) { avcodec_free_context(&m->encCtx); m->encCtx = nullptr; }
+    if (m->fmtCtx) { avformat_free_context(m->fmtCtx); m->fmtCtx = nullptr; }
 
-    // Cleanup audio transcode
-    if (m->audioDecCtx)   avcodec_free_context(&m->audioDecCtx);
-    if (m->audioEncCtx)   avcodec_free_context(&m->audioEncCtx);
-    if (m->audioFrame)    av_frame_free(&m->audioFrame);
-    if (m->audioEncFrame) av_frame_free(&m->audioEncFrame);
-    if (m->audioSwr)      swr_free(&m->audioSwr);
+    if (m->audioDecCtx)   { avcodec_free_context(&m->audioDecCtx); m->audioDecCtx = nullptr; }
+    if (m->audioEncCtx)   { avcodec_free_context(&m->audioEncCtx); m->audioEncCtx = nullptr; }
+    if (m->audioFrame)    { av_frame_free(&m->audioFrame); m->audioFrame = nullptr; }
+    if (m->audioEncFrame) { av_frame_free(&m->audioEncFrame); m->audioEncFrame = nullptr; }
+    if (m->audioSwr)      { swr_free(&m->audioSwr); m->audioSwr = nullptr; }
 
     m->frameCount = 0;
     m->videoStream = nullptr;
