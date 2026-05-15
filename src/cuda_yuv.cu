@@ -5,7 +5,7 @@ static __device__ __forceinline__ int clamp(int v, int lo, int hi) {
     return (v < lo) ? lo : (v > hi) ? hi : v;
 }
 
-// NV12 -> RGBA (BT.709)
+// NV12 -> RGBA (BT.601 Limited Range)
 // Each thread handles one output pixel
 // y_plane: w x h bytes, y_pitch = stride of Y plane (>= w)
 // uv_plane: w x (h/2) bytes interleaved U/V, uv_pitch = stride of UV plane (>= w)
@@ -20,11 +20,11 @@ __global__ void nv12_to_rgba_kernel(
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
 
-    int Y = y_plane[y * y_pitch + x];
+    int Y = y_plane[y * y_pitch + x] - 16;
     int U = uv_plane[(y / 2) * uv_pitch + (x & ~1)] - 128;
     int V = uv_plane[(y / 2) * uv_pitch + (x & ~1) + 1] - 128;
 
-    // BT.709 integer matrix
+    // BT.601 limited range integer matrix
     int r = (298 * Y           + 409 * V + 128) >> 8;
     int g = (298 * Y - 100 * U - 208 * V + 128) >> 8;
     int b = (298 * Y + 516 * U           + 128) >> 8;
@@ -36,7 +36,7 @@ __global__ void nv12_to_rgba_kernel(
     rgba_out[out_idx + 3] = 0xFF;
 }
 
-// RGBA -> NV12 (BT.709)
+// RGBA -> NV12 (BT.601 Limited Range)
 // Each thread handles one pixel for Y, UV computed once per 2x2 block
 __global__ void rgba_to_nv12_kernel(
     const uint8_t* rgba, int rgba_pitch,
