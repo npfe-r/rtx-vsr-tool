@@ -199,6 +199,21 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
 
     LoadConfigToUI();
 
+    // Try to read last input file info on startup — skip silently on failure
+    if (m_inputPath[0]) {
+        wchar_t wpath[MAX_PATH];
+        widen(m_inputPath, wpath, MAX_PATH);
+        VideoDecoder decoder;
+        if (decoder.Open(wpath, &m_videoInfo)) {
+            snprintf(m_inputInfo, sizeof(m_inputInfo),
+                     "%d x %d  %.2f fps  %s",
+                     m_videoInfo.width, m_videoInfo.height,
+                     m_videoInfo.fps,
+                     m_videoInfo.hasAudio ? "有音频" : "无音频");
+            decoder.Close();
+        }
+    }
+
     ShowWindow(m_hWnd, nCmdShow);
     UpdateWindow(m_hWnd);
     return true;
@@ -599,6 +614,25 @@ void MainWindow::RenderUI()
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_audioBitrate);
         else
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
+
+        // Encoder resolution compatibility check — update warning for bottom bar
+        {
+            bool hadWarning = m_encoderWarning[0] != '\0';
+            m_encoderWarning[0] = '\0';
+            if (m_encoderIndex == 0) {
+                if (outW > 4096 || outH > 4096)
+                    snprintf(m_encoderWarning, sizeof(m_encoderWarning),
+                             "H.264 NVENC 不支持 %dx%d (最大 4096x4096)，建议切换到 HEVC 或 AV1",
+                             outW, outH);
+            } else if (m_encoderIndex <= 2) {
+                if (outW > 8192 || outH > 8192)
+                    snprintf(m_encoderWarning, sizeof(m_encoderWarning),
+                             "NVENC 不支持 %dx%d (最大 8192x8192)，建议切换到软件编码器",
+                             outW, outH);
+            }
+            if (hadWarning && m_encoderWarning[0] == '\0')
+                m_statusText[0] = '\0';
+        }
     } else {
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "选择文件后显示");
     }
@@ -817,9 +851,14 @@ void MainWindow::RenderUI()
 
     {
         const char* status = m_statusText[0] ? m_statusText : "就绪";
+        bool showWarning = m_encoderWarning[0] && !m_isRunning;
+        if (showWarning) status = m_encoderWarning;
         float tw = ImGui::CalcTextSize(status).x;
         ImGui::SetCursorPos(ImVec2((winW - tw) * 0.5f, 32));
-        ImGui::Text("%s", status);
+        if (showWarning)
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.0f, 1.0f), "%s", status);
+        else
+            ImGui::Text("%s", status);
 
         if (m_decodeMode[0]) {
             char modeBuf[32];

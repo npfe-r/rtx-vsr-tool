@@ -71,8 +71,9 @@ private:
     int     m_audioBitrate     = 128;
     int     m_outputFps        = 0;
     float   m_progressPct      = 0.0f;
-    char    m_statusText[256]  = {};
-    char    m_decodeMode[16]   = {};
+    char    m_statusText[256]    = {};
+    char    m_encoderWarning[256] = {};
+    char    m_decodeMode[16]     = {};
 
     PipelineController m_pipeline;
     Config             m_config;
