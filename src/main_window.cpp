@@ -750,8 +750,8 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
-    static const char* containerNames[] = { "MP4", "MKV", "MOV" };
-    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 3))
+    static const char* containerNames[] = { "MP4", "MOV" };
+    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 2))
         m_config.Get().containerFormat = m_containerFormat;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
@@ -926,10 +926,10 @@ void MainWindow::OnSelectInput()
         wcscpy(outPath, path);
         wchar_t* dot = wcsrchr(outPath, L'.');
         if (dot) {
-            static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mkv", L"_VSR.mov" };
+            static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mov" };
             int idx = m_containerFormat;
             if (idx < 0) idx = 0;
-            if (idx > 2) idx = 0;
+            if (idx > 1) idx = 0;
             wcscpy(dot, containerExt[idx]);
         }
         narrow(outPath, m_outputPath, sizeof(m_outputPath));
@@ -950,7 +950,7 @@ void MainWindow::OnSelectOutput()
 
     OPENFILENAMEW ofn = { sizeof(ofn), m_hWnd, m_hInst };
     ofn.lpstrInitialDir = exeDir;
-    ofn.lpstrFilter = L"MP4\0*.mp4\0MKV\0*.mkv\0MOV\0*.mov\0"
+    ofn.lpstrFilter = L"MP4\0*.mp4\0MOV\0*.mov\0"
                       L"所有文件\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile  = MAX_PATH;

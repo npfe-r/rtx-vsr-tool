@@ -3,16 +3,35 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 
 #include <vector>
 
+static AVPixelFormat g_hw_pix_fmt = AV_PIX_FMT_NONE;
+
+static enum AVPixelFormat get_hw_format(AVCodecContext* ctx,
+                                        const enum AVPixelFormat* pixFmts) {
+    const enum AVPixelFormat* p;
+    for (p = pixFmts; *p != -1; p++) {
+        if (*p == g_hw_pix_fmt)
+            return *p;
+    }
+    return pixFmts[0];
+}
+
 struct VideoDecoder::Impl {
     AVFormatContext* fmtCtx = nullptr;
     AVCodecContext*  decCtx  = nullptr;
     AVFrame*         decoded = nullptr;
+    AVFrame*         swFrame = nullptr;
     SwsContext*      swsCtx  = nullptr;
+
+    AVBufferRef*     hwDeviceCtx = nullptr;
+    AVPixelFormat    hwPixFmt = AV_PIX_FMT_NONE;
+    bool             useHW = false;
 
     int videoStreamIdx = -1;
     int targetW = 0, targetH = 0;
@@ -27,8 +46,48 @@ VideoDecoder::VideoDecoder() : m(new Impl) {}
 VideoDecoder::~VideoDecoder() { Close(); delete m; }
 
 bool VideoDecoder::IsOpen() const { return m->fmtCtx != nullptr; }
+bool VideoDecoder::IsHWDecoding() const { return m->useHW; }
 
-bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
+// ---- Shared decode loop: fills m->decoded with the next frame, returns true on success ----
+bool VideoDecoder::DecodeOne() {
+    if (!m_drainSent) {
+        int ret = avcodec_receive_frame(m->decCtx, m->decoded);
+        if (ret == 0) return true;
+    }
+    if (m_drainSent) return false;
+
+    if (!m_eof) {
+        AVPacket pkt;
+        while (av_read_frame(m->fmtCtx, &pkt) >= 0) {
+            int si = pkt.stream_index;
+            if (si == m->videoStreamIdx) {
+                int sr = avcodec_send_packet(m->decCtx, &pkt);
+                av_packet_unref(&pkt);
+                if (sr < 0) continue;
+                while (avcodec_receive_frame(m->decCtx, m->decoded) >= 0)
+                    return true;
+            } else if (m->audioPackets && si == m->audioStreamIdx) {
+                AVPacket* copy = av_packet_alloc();
+                av_packet_ref(copy, &pkt);
+                m->audioPackets->push_back(copy);
+                av_packet_unref(&pkt);
+            } else {
+                av_packet_unref(&pkt);
+            }
+        }
+        m_eof = true;
+    }
+
+    if (m_eof && !m_drainSent) {
+        avcodec_send_packet(m->decCtx, NULL);
+        m_drainSent = true;
+        return avcodec_receive_frame(m->decCtx, m->decoded) >= 0;
+    }
+
+    return false;
+}
+
+bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
     Close();
 
     char pathA[MAX_PATH];
@@ -56,9 +115,43 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
     AVStream* vs = m->fmtCtx->streams[m->videoStreamIdx];
     m->decCtx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(m->decCtx, vs->codecpar);
+
+    // Try to initialize CUDA hardware decoding
+    if (useGPU) {
+        enum AVHWDeviceType hwType = av_hwdevice_find_type_by_name("cuda");
+        if (hwType != AV_HWDEVICE_TYPE_NONE) {
+            for (int i = 0;; i++) {
+                const AVCodecHWConfig* config = avcodec_get_hw_config(codec, i);
+                if (!config) break;
+                if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+                    config->device_type == hwType) {
+                    m->hwPixFmt = config->pix_fmt;
+                    break;
+                }
+            }
+        }
+        if (m->hwPixFmt != AV_PIX_FMT_NONE) {
+            AVBufferRef* hwCtx = nullptr;
+            if (av_hwdevice_ctx_create(&hwCtx, hwType, NULL, NULL, 0) >= 0) {
+                m->hwDeviceCtx = hwCtx;
+                m->useHW = true;
+                m->decCtx->hw_device_ctx = av_buffer_ref(m->hwDeviceCtx);
+                g_hw_pix_fmt = m->hwPixFmt;
+                m->decCtx->get_format = get_hw_format;
+            }
+        }
+        if (m->useHW) {
+            OutputDebugStringA("DEC: CUDA hardware decoding enabled\n");
+        } else {
+            OutputDebugStringA("DEC: CUDA hardware decoding not available, falling back to software\n");
+        }
+    }
+
     if (avcodec_open2(m->decCtx, codec, NULL) < 0) return false;
 
     m->decoded = av_frame_alloc();
+    if (m->useHW)
+        m->swFrame = av_frame_alloc();
     m->targetW = m->decCtx->width;
     m->targetH = m->decCtx->height;
 
@@ -105,66 +198,25 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
 
 bool VideoDecoder::ReadFrameNV12(uint8_t* outData, int* outStride) {
     if (!m->fmtCtx || !m->decCtx) return false;
+    if (!DecodeOne()) return false;
 
-    if (!m_drainSent) {
-        int recvRet = avcodec_receive_frame(m->decCtx, m->decoded);
-        if (recvRet == 0) {
-            goto convert;
-        }
+    if (m->useHW && m->decoded->format == m->hwPixFmt) {
+        if (av_hwframe_transfer_data(m->swFrame, m->decoded, 0) < 0)
+            return false;
+        int h = m->targetH;
+        int w = m->targetW;
+        for (int y = 0; y < h; y++)
+            memcpy(outData + y * w,
+                   m->swFrame->data[0] + y * m->swFrame->linesize[0], w);
+        int uvH = h / 2;
+        uint8_t* uvDst = outData + w * h;
+        for (int y = 0; y < uvH; y++)
+            memcpy(uvDst + y * w,
+                   m->swFrame->data[1] + y * m->swFrame->linesize[1], w);
+        outStride[0] = w;
+        outStride[1] = w;
+        return true;
     }
-
-    if (m_drainSent) {
-        return false;
-    }
-
-    if (!m_eof) {
-        AVPacket pkt;
-        int readRet;
-        while ((readRet = av_read_frame(m->fmtCtx, &pkt)) >= 0) {
-            int si = pkt.stream_index;
-            if (si == m->videoStreamIdx) {
-                int sendRet = avcodec_send_packet(m->decCtx, &pkt);
-                av_packet_unref(&pkt);
-                if (sendRet < 0) {
-                    char buf[256];
-                    snprintf(buf, sizeof(buf), "DEC: avcodec_send_packet error: %d", sendRet);
-                    OutputDebugStringA(buf);
-                    continue;
-                }
-                while (avcodec_receive_frame(m->decCtx, m->decoded) >= 0) {
-                    goto convert;
-                }
-            } else if (m->audioPackets && si == m->audioStreamIdx) {
-                AVPacket* copy = av_packet_alloc();
-                av_packet_ref(copy, &pkt);
-                m->audioPackets->push_back(copy);
-                av_packet_unref(&pkt);
-            } else {
-                av_packet_unref(&pkt);
-            }
-        }
-
-        m_eof = true;
-        if (readRet == AVERROR_EOF) {
-            OutputDebugStringA("DEC: EOF reached, draining decoder\n");
-        } else {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "DEC: av_read_frame error: %d", readRet);
-            OutputDebugStringA(buf);
-        }
-    }
-
-    if (m_eof && !m_drainSent) {
-        avcodec_send_packet(m->decCtx, NULL);
-        m_drainSent = true;
-        if (avcodec_receive_frame(m->decCtx, m->decoded) >= 0) {
-            goto convert;
-        }
-    }
-
-    return false;
-
-convert:
     {
         int dstStrides[2] = { m->targetW, m->targetW };
         uint8_t* dst[2] = { outData, outData + m->targetW * m->targetH };
@@ -184,15 +236,36 @@ convert:
     }
 }
 
+bool VideoDecoder::ReadFrameGPU(const uint8_t** outY, int* yPitch,
+                                 const uint8_t** outUV, int* uvPitch) {
+    if (!m->fmtCtx || !m->decCtx) return false;
+    if (!DecodeOne()) return false;
+
+    if (m->useHW && m->decoded->format == m->hwPixFmt) {
+        *outY = reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<uintptr_t>(m->decoded->data[0]));
+        *yPitch = m->decoded->linesize[0];
+        *outUV = reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<uintptr_t>(m->decoded->data[1]));
+        *uvPitch = m->decoded->linesize[1];
+        return true;
+    }
+    return false;
+}
+
 void VideoDecoder::Close() {
     if (m->swsCtx) sws_freeContext(m->swsCtx);
+    if (m->swFrame) av_frame_free(&m->swFrame);
     if (m->decoded) av_frame_free(&m->decoded);
+    if (m->hwDeviceCtx) av_buffer_unref(&m->hwDeviceCtx);
     if (m->decCtx) avcodec_free_context(&m->decCtx);
     if (m->fmtCtx) avformat_close_input(&m->fmtCtx);
     if (m->audioCodecPar) { avcodec_parameters_free(&m->audioCodecPar); m->audioCodecPar = nullptr; }
     m->videoStreamIdx = -1;
     m->audioStreamIdx = -1;
     m->swsCtx = nullptr;
+    m->useHW = false;
+    m->hwPixFmt = AV_PIX_FMT_NONE;
     m_eof = false;
     m_drainSent = false;
 }

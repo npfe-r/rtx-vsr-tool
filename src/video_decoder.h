@@ -23,8 +23,14 @@ public:
     VideoDecoder();
     ~VideoDecoder();
 
-    bool Open(const wchar_t* path, VideoInfo* info);
+    bool Open(const wchar_t* path, VideoInfo* info, bool useGPU = false);
     bool ReadFrameNV12(uint8_t* outData, int* outStride);  // out: stride(y), stride(uv)
+
+    // GPU decode: get device pointers directly (no CPU copy)
+    // Y/UV pointers are GPU device pointers valid until next ReadFrame call
+    bool ReadFrameGPU(const uint8_t** outY, int* yPitch,
+                      const uint8_t** outUV, int* uvPitch);
+    bool IsHWDecoding() const;
     void Close();
     bool IsOpen() const;
 
@@ -39,4 +45,5 @@ private:
     Impl* m;
     bool m_eof = false;
     bool m_drainSent = false;
+    bool DecodeOne();  // shared decode: returns true if m->decoded has a new frame
 };

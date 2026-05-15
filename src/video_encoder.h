@@ -15,7 +15,7 @@ struct EncodeConfig {
     int codecId = 0;
     int crf = 18;
     int speed = 2;       // 0=fast...4=slow
-    int container = 0;   // 0=mp4, 1=mkv, 2=mov
+    int container = 0;   // 0=mp4, 1=mov
 
     // Audio remux (optional)
     bool hasAudio = false;

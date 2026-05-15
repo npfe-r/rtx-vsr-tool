@@ -91,8 +91,7 @@ static const char* GetDisplayName(const char* name) {
 static const char* GetContainerExt(int container) {
     switch (container) {
         case 0: return "mp4";
-        case 1: return "matroska";
-        case 2: return "mov";
+        case 1: return "mov";
         default: return "mp4";
     }
 }
@@ -125,17 +124,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             if (statusCb) statusCb("分辨率超出NVENC上限(8192)，自动使用软件编码器");
         }
 
-        if (cfg.container == 1) {
-            if (nvencOversize) {
-                fallbackNames[0] = "libaom-av1";
-                fallbackCount = 1;
-            } else {
-                if (statusCb) statusCb("MKV: 仅支持 AV1 编码器");
-                fallbackNames[0] = "av1_nvenc";
-                fallbackNames[1] = "libaom-av1";
-                fallbackCount = 2;
-            }
-        } else if (cfg.codecId <= 2) {
+        if (cfg.codecId <= 2) {
             if (nvencOversize) {
                 if (cfg.codecId == 0) {
                     fallbackNames[0] = "libx264";
@@ -368,16 +357,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         EncLog("avio_open OK");
     }
 
-    // Prevent matroska muxer from buffering unbounded packets
-    if (cfg.container == 1) {
-        AVDictionary* muxOpts = nullptr;
-        av_dict_set_int(&muxOpts, "cluster_time_limit", 1000000, 0);
-        av_dict_set_int(&muxOpts, "reserve_index_space", 1024, 0);
-        avformat_write_header(m->fmtCtx, &muxOpts);
-        av_dict_free(&muxOpts);
-    } else {
-        avformat_write_header(m->fmtCtx, NULL);
-    }
+    avformat_write_header(m->fmtCtx, NULL);
 
     // Allocate frame for encoding
     m->frame = av_frame_alloc();

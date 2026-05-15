@@ -134,12 +134,15 @@ void PipelineController::DecodeFunc() {
     LogDbg("Decode: CUDA device set");
 
     size_t nv12Size = (size_t)m_srcW * m_srcH * 3 / 2;
+    bool gpuPath = m_decoder.IsHWDecoding();
+    if (gpuPath)
+        LogDbg("Decode: using GPU-only path (NVDEC -> GPU -> NV12->RGBA)");
     int decFrameIdx = 0;
 
     while (true) {
         if (m_state.load() == PipelineState::Paused) {
             std::unique_lock<std::mutex> lk(m_pauseMutex);
-            m_pauseCv.wait(lk, [] { return true; }); // will be re-checked after wait
+            m_pauseCv.wait(lk, [] { return true; });
         }
         while (m_state.load() == PipelineState::Paused) {
             Sleep(10);
@@ -166,22 +169,40 @@ void PipelineController::DecodeFunc() {
 
         FrameSlot& slot = m_slots[slotIdx];
 
-        int strides[2];
-        if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, strides)) {
-            LogDbg("Decode: EOF or error");
-            slot.state.store(SlotState::Empty);
-            m_decodeDone.store(true);
-            m_slotCv.notify_one();
-            break;
-        }
+        if (gpuPath) {
+            const uint8_t* yDev = nullptr;
+            const uint8_t* uvDev = nullptr;
+            int yPitch = 0, uvPitch = 0;
+            if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch)) {
+                LogDbg("Decode GPU: EOF or error");
+                slot.state.store(SlotState::Empty);
+                m_decodeDone.store(true);
+                m_slotCv.notify_one();
+                break;
+            }
+            launch_nv12_to_rgba(
+                yDev, yPitch,
+                uvDev, uvPitch,
+                slot.d_rgba_src, m_srcW * 4,
+                m_srcW, m_srcH, slot.stream);
+        } else {
+            int strides[2];
+            if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, strides)) {
+                LogDbg("Decode: EOF or error");
+                slot.state.store(SlotState::Empty);
+                m_decodeDone.store(true);
+                m_slotCv.notify_one();
+                break;
+            }
 
-        cudaMemcpyAsync(slot.d_nv12, slot.nv12_cpu, nv12Size,
-                        cudaMemcpyHostToDevice, slot.stream);
-        launch_nv12_to_rgba(
-            slot.d_nv12, m_srcW,
-            slot.d_nv12 + m_srcW * m_srcH, m_srcW,
-            slot.d_rgba_src, m_srcW * 4,
-            m_srcW, m_srcH, slot.stream);
+            cudaMemcpyAsync(slot.d_nv12, slot.nv12_cpu, nv12Size,
+                            cudaMemcpyHostToDevice, slot.stream);
+            launch_nv12_to_rgba(
+                slot.d_nv12, m_srcW,
+                slot.d_nv12 + m_srcW * m_srcH, m_srcW,
+                slot.d_rgba_src, m_srcW * 4,
+                m_srcW, m_srcH, slot.stream);
+        }
         cudaStreamSynchronize(slot.stream);
         if (CudaFailed("Decode: NV12->RGBA")) {
             LogDbg("Decode: CUDA error in NV12->RGBA");
@@ -238,13 +259,18 @@ void PipelineController::ThreadFuncImpl() {
     // ---- Open decoder ----
     LogStatus(onStatus, "打开解码器...");
     VideoInfo info;
-    if (!m_decoder.Open(m_cfg.inputPath.c_str(), &info)) {
+    if (!m_decoder.Open(m_cfg.inputPath.c_str(), &info, true)) {
         LogDbg("Failed to open input file");
         if (onError) onError(L"无法打开输入文件");
         m_state.store(PipelineState::Error);
         return;
     }
     LogStatus(onStatus, "解码器打开成功");
+    if (m_decoder.IsHWDecoding()) {
+        LogStatus(onStatus, "GPU 硬件解码已启用 (NVDEC)");
+    } else {
+        LogStatus(onStatus, "GPU 解码不可用，自动回退到 CPU 解码");
+    }
 
     m_srcW = info.width;
     m_srcH = info.height;
