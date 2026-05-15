@@ -366,9 +366,22 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.audioPackets  = &m_audioPackets;
         encCfg.audioCodecPar = m_decoder.GetAudioCodecPar();
 
-        if (!m_encoder.Open(encCfg, onStatus)) {
+        std::string lastEncErr;
+        auto encStatus = [&](const char* msg) {
+            LogDbg(msg);
+            if (msg) lastEncErr = msg;
+            if (onStatus) onStatus(msg);
+        };
+        if (!m_encoder.Open(encCfg, encStatus)) {
             LogDbg("Failed to open encoder");
-            if (onError) onError(L"无法打开编码器");
+            if (onError) {
+                wchar_t wbuf[512];
+                if (!lastEncErr.empty())
+                    MultiByteToWideChar(CP_UTF8, 0, lastEncErr.c_str(), -1, wbuf, 512);
+                else
+                    wcscpy(wbuf, L"无法打开编码器");
+                onError(wbuf);
+            }
             m_state.store(PipelineState::Error);
             goto cleanup;
         }

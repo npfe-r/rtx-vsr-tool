@@ -80,6 +80,7 @@ private:
     bool               m_isRunning         = false;
     bool               m_isPaused          = false;
     bool               m_showCompletePopup = false;
+    bool               m_hasError          = false;
 
     std::vector<std::string> m_gpuNames;
     bool m_autoSized = false;

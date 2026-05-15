@@ -96,11 +96,21 @@ static const char* GetContainerExt(int container) {
     }
 }
 
-static const int NVENC_MAX_WIDTH  = 8192;
-static const int NVENC_MAX_HEIGHT = 8192;
+// Per-codec NVENC maximum dimensions
+static const int H264_NVENC_MAX_WIDTH  = 4096;
+static const int H264_NVENC_MAX_HEIGHT = 4096;
+static const int HEVC_NVENC_MAX_WIDTH  = 8192;
+static const int HEVC_NVENC_MAX_HEIGHT = 8192;
+static const int AV1_NVENC_MAX_WIDTH   = 8192;
+static const int AV1_NVENC_MAX_HEIGHT  = 8192;
 
-static bool IsResolutionWithinNVENC(int width, int height) {
-    return width <= NVENC_MAX_WIDTH && height <= NVENC_MAX_HEIGHT;
+static bool IsResolutionWithinNVENC(int codecId, int width, int height) {
+    switch (codecId) {
+        case 0: return width <= H264_NVENC_MAX_WIDTH && height <= H264_NVENC_MAX_HEIGHT;
+        case 1: return width <= HEVC_NVENC_MAX_WIDTH && height <= HEVC_NVENC_MAX_HEIGHT;
+        case 2: return width <= AV1_NVENC_MAX_WIDTH  && height <= AV1_NVENC_MAX_HEIGHT;
+        default: return true;
+    }
 }
 
 VideoEncoder::VideoEncoder() : m(new Impl) {}
@@ -113,168 +123,113 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     { char _b[256]; snprintf(_b, sizeof(_b), "Open encoder: codecId=%d width=%d height=%d fps=%.1f crf=%d speed=%d container=%d",
         cfg.codecId, cfg.width, cfg.height, cfg.fps, cfg.crf, cfg.speed, cfg.container); EncLog(_b); }
 
-    const char* userDisplayName = GetDisplayName(GetEncoderName(cfg.codecId));
+    const char* encName = GetEncoderName(cfg.codecId);
+    const char* displayName = GetDisplayName(encName);
 
-    const char* fallbackNames[5];
-    int fallbackCount = 0;
-    {
-        bool nvencOversize = !IsResolutionWithinNVENC(cfg.width, cfg.height);
-        if (nvencOversize && cfg.codecId <= 2) {
-            EncLog("Resolution exceeds NVENC limit (8192), skipping hardware encoders");
-            if (statusCb) statusCb("分辨率超出NVENC上限(8192)，自动使用软件编码器");
-        }
-
-        if (cfg.codecId <= 2) {
-            if (nvencOversize) {
-                if (cfg.codecId == 0) {
-                    fallbackNames[0] = "libx264";
-                    fallbackNames[1] = "libx265";
-                    fallbackCount = 2;
-                } else if (cfg.codecId == 1) {
-                    fallbackNames[0] = "libx265";
-                    fallbackNames[1] = "libx264";
-                    fallbackCount = 2;
-                } else {
-                    fallbackNames[0] = "libaom-av1";
-                    fallbackNames[1] = "libx265";
-                    fallbackCount = 2;
-                }
-            } else {
-                if (cfg.codecId == 0) {
-                    fallbackNames[0] = "h264_nvenc";
-                    fallbackNames[1] = "hevc_nvenc";
-                    fallbackNames[2] = "av1_nvenc";
-                    fallbackNames[3] = "libx264";
-                    fallbackNames[4] = "libx265";
-                    fallbackCount = 5;
-                } else if (cfg.codecId == 1) {
-                    fallbackNames[0] = "hevc_nvenc";
-                    fallbackNames[1] = "av1_nvenc";
-                    fallbackNames[2] = "libx265";
-                    fallbackNames[3] = "libx264";
-                    fallbackCount = 4;
-                } else {
-                    fallbackNames[0] = "av1_nvenc";
-                    fallbackNames[1] = "libaom-av1";
-                    fallbackNames[2] = "libx265";
-                    fallbackCount = 3;
-                }
-            }
-        } else {
-            fallbackNames[0] = GetEncoderName(cfg.codecId);
-            fallbackCount = 1;
-        }
-    }
-
-    const AVCodec* codec = nullptr;
-    const char* chosenName = nullptr;
-
-    for (int i = 0; i < fallbackCount; i++) {
-        const char* tryName = fallbackNames[i];
-        { char _b[256]; snprintf(_b, sizeof(_b), "Looking for encoder: %s", tryName); EncLog(_b); }
-
-        codec = avcodec_find_encoder_by_name(tryName);
-        if (!codec) {
-            EncLog("  -> not found");
-            continue;
-        }
-        { char _b[256]; snprintf(_b, sizeof(_b), "  -> found %s", avcodec_get_name(codec->id)); EncLog(_b); }
-
+    bool nvencOversize = (cfg.codecId <= 2) && !IsResolutionWithinNVENC(cfg.codecId, cfg.width, cfg.height);
+    if (nvencOversize) {
         if (statusCb) {
-            char msg[128];
-            snprintf(msg, sizeof(msg), i > 0 ? "编码器: 尝试降级到 %s..." : "编码器: 打开 %s...",
-                     GetDisplayName(tryName));
+            char msg[256];
+            int maxW = 8192, maxH = 8192;
+            if (cfg.codecId == 0)      { maxW = H264_NVENC_MAX_WIDTH;  maxH = H264_NVENC_MAX_HEIGHT; }
+            else if (cfg.codecId == 1) { maxW = HEVC_NVENC_MAX_WIDTH;  maxH = HEVC_NVENC_MAX_HEIGHT; }
+            else if (cfg.codecId == 2) { maxW = AV1_NVENC_MAX_WIDTH;   maxH = AV1_NVENC_MAX_HEIGHT; }
+            snprintf(msg, sizeof(msg), "编码器 %s 打开失败: 分辨率(%dx%d)超出上限(%dx%d)",
+                     displayName, cfg.width, cfg.height, maxW, maxH);
             statusCb(msg);
         }
+        return false;
+    }
 
-        // Allocate output context on first iteration
-        if (i == 0) {
-            const char* ext = GetContainerExt(cfg.container);
-            { char _b[256]; snprintf(_b, sizeof(_b), "Alloc output context, format=%s", ext); EncLog(_b); }
-            avformat_alloc_output_context2(&m->fmtCtx, NULL, ext, NULL);
-            if (!m->fmtCtx) { EncLog("avformat_alloc_output_context2 failed"); return false; }
-            EncLog("Output context allocated");
-            m->videoStream = avformat_new_stream(m->fmtCtx, NULL);
-        }
+    if (statusCb) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "编码器: 打开 %s...", displayName);
+        statusCb(msg);
+    }
 
-        m->encCtx = avcodec_alloc_context3(codec);
-        m->encCtx->width     = cfg.width;
-        m->encCtx->height    = cfg.height;
-        AVRational fpsRat = av_d2q(cfg.fps, 1001);
-        m->encCtx->time_base = av_inv_q(fpsRat);
-        m->encCtx->framerate = fpsRat;
-        m->encCtx->pix_fmt   = m->pixFmt = IsNVENCByName(tryName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-        m->encCtx->color_range = AVCOL_RANGE_MPEG;
-        m->encCtx->color_primaries = AVCOL_PRI_BT709;
-        m->encCtx->color_trc = AVCOL_TRC_BT709;
-        m->encCtx->colorspace = AVCOL_SPC_BT709;
-        m->encCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
-
-        if (IsNVENCByName(tryName)) {
-            const char* nvPresets[] = { "p1", "p3", "p4", "p6", "p7" };
-            int idx = cfg.speed;
-            if (idx < 0) idx = 0;
-            if (idx > 4) idx = 4;
-            av_opt_set(m->encCtx->priv_data, "preset", nvPresets[idx], 0);
-            av_opt_set_int(m->encCtx->priv_data, "cq", cfg.crf, 0);
-            av_opt_set(m->encCtx->priv_data, "rc", "vbr", 0);
-            av_opt_set_int(m->encCtx->priv_data, "b", 0, 0);
-        } else {
-            char crfStr[8];
-            snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
-            av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
-
-            int cpuUsed = 0;
-            const char* usage = "good";
-            switch (cfg.speed) {
-                case 0: cpuUsed = 6; usage = "realtime"; break;
-                case 1: cpuUsed = 5; usage = "realtime"; break;
-                case 2: cpuUsed = 3; usage = "good";     break;
-                case 3: cpuUsed = 1; usage = "good";     break;
-                case 4: cpuUsed = 0; usage = "good";     break;
-            }
-
-            m->encCtx->thread_count = (int)std::thread::hardware_concurrency();
-            av_opt_set_int(m->encCtx->priv_data, "cpu-used", cpuUsed, 0);
-            av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
-            av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
-            av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
-
-            int tileCols = 0, tileRows = 0;
-            if (cfg.width >= 3840) tileCols = 1;
-            if (cfg.height >= 2160) tileRows = 1;
-            av_opt_set_int(m->encCtx->priv_data, "tile-columns", tileCols, 0);
-            av_opt_set_int(m->encCtx->priv_data, "tile-rows", tileRows, 0);
-        }
-
-        { char _b[256]; snprintf(_b, sizeof(_b), "avcodec_open2(%s)...", tryName); EncLog(_b); }
-        int ret = avcodec_open2(m->encCtx, codec, NULL);
-        if (ret >= 0) {
-            EncLog("avcodec_open2 OK");
-            chosenName = tryName;
-            if (statusCb) {
-                char msg[128];
-                snprintf(msg, sizeof(msg), "编码器: %s 打开成功", GetDisplayName(tryName));
-                statusCb(msg);
-            }
-            break;
-        }
-        char err[256];
-        av_strerror(ret, err, sizeof(err));
-        { char _b[256]; snprintf(_b, sizeof(_b), "avcodec_open2 failed: %s (%d)", err, ret); EncLog(_b); }
+    const AVCodec* codec = avcodec_find_encoder_by_name(encName);
+    if (!codec) {
         if (statusCb) {
             char msg[128];
-            snprintf(msg, sizeof(msg), "编码器: %s 不支持此分辨率，尝试其他编码器", userDisplayName);
+            snprintf(msg, sizeof(msg), "编码器 %s 未找到", displayName);
+            statusCb(msg);
+        }
+        return false;
+    }
+
+    const char* ext = GetContainerExt(cfg.container);
+    avformat_alloc_output_context2(&m->fmtCtx, NULL, ext, NULL);
+    if (!m->fmtCtx) { EncLog("avformat_alloc_output_context2 failed"); return false; }
+    m->videoStream = avformat_new_stream(m->fmtCtx, NULL);
+
+    m->encCtx = avcodec_alloc_context3(codec);
+    m->encCtx->width     = cfg.width;
+    m->encCtx->height    = cfg.height;
+    AVRational fpsRat = av_d2q(cfg.fps, 1001);
+    m->encCtx->time_base = av_inv_q(fpsRat);
+    m->encCtx->framerate = fpsRat;
+    m->encCtx->pix_fmt   = m->pixFmt = IsNVENCByName(encName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    m->encCtx->color_range = AVCOL_RANGE_MPEG;
+    m->encCtx->color_primaries = AVCOL_PRI_BT709;
+    m->encCtx->color_trc = AVCOL_TRC_BT709;
+    m->encCtx->colorspace = AVCOL_SPC_BT709;
+    m->encCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
+
+    if (IsNVENCByName(encName)) {
+        const char* nvPresets[] = { "p1", "p3", "p4", "p6", "p7" };
+        int idx = cfg.speed;
+        if (idx < 0) idx = 0;
+        if (idx > 4) idx = 4;
+        av_opt_set(m->encCtx->priv_data, "preset", nvPresets[idx], 0);
+        av_opt_set_int(m->encCtx->priv_data, "cq", cfg.crf, 0);
+        av_opt_set(m->encCtx->priv_data, "rc", "vbr", 0);
+        av_opt_set_int(m->encCtx->priv_data, "b", 0, 0);
+    } else {
+        char crfStr[8];
+        snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
+        av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
+
+        int cpuUsed = 0;
+        const char* usage = "good";
+        switch (cfg.speed) {
+            case 0: cpuUsed = 6; usage = "realtime"; break;
+            case 1: cpuUsed = 5; usage = "realtime"; break;
+            case 2: cpuUsed = 3; usage = "good";     break;
+            case 3: cpuUsed = 1; usage = "good";     break;
+            case 4: cpuUsed = 0; usage = "good";     break;
+        }
+
+        m->encCtx->thread_count = (int)std::thread::hardware_concurrency();
+        av_opt_set_int(m->encCtx->priv_data, "cpu-used", cpuUsed, 0);
+        av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
+        av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
+        av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
+
+        int tileCols = 0, tileRows = 0;
+        if (cfg.width >= 3840) tileCols = 1;
+        if (cfg.height >= 2160) tileRows = 1;
+        av_opt_set_int(m->encCtx->priv_data, "tile-columns", tileCols, 0);
+        av_opt_set_int(m->encCtx->priv_data, "tile-rows", tileRows, 0);
+    }
+
+    int ret = avcodec_open2(m->encCtx, codec, NULL);
+    if (ret < 0) {
+        char err[256];
+        av_strerror(ret, err, sizeof(err));
+        if (statusCb) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "编码器 %s 打开失败: %s", displayName, err);
             statusCb(msg);
         }
         avcodec_free_context(&m->encCtx);
         m->encCtx = nullptr;
+        return false;
     }
 
-    if (!chosenName) {
-        EncLog("All encoder attempts failed");
-        if (statusCb) statusCb("编码器: 所有编码器均不支持此分辨率");
-        return false;
+    if (statusCb) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "编码器: %s 打开成功", displayName);
+        statusCb(msg);
     }
 
     avcodec_parameters_from_context(m->videoStream->codecpar, m->encCtx);

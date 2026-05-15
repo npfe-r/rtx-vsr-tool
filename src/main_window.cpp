@@ -292,6 +292,7 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
         m_isRunning = false;
         m_isPaused  = false;
+        m_hasError  = true;
         return 0;
     }
 
@@ -299,7 +300,8 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_USER + 4: {
         auto* statusMsg = (char*)wParam;
         if (statusMsg) {
-            snprintf(m_statusText, sizeof(m_statusText), "%s", statusMsg);
+            if (!m_hasError)
+                snprintf(m_statusText, sizeof(m_statusText), "%s", statusMsg);
             delete[] statusMsg;
         }
         return 0;
@@ -1016,6 +1018,7 @@ void MainWindow::OnStartStop()
             m_isRunning          = true;
             m_progressPct        = 0.0f;
             m_showCompletePopup  = false;
+            m_hasError           = false;
             m_startTime          = std::chrono::steady_clock::now();
             snprintf(m_statusText, sizeof(m_statusText), "处理中...");
         } else {
@@ -1025,6 +1028,7 @@ void MainWindow::OnStartStop()
         m_pipeline.Stop();
         m_isRunning = false;
         m_isPaused  = false;
+        m_hasError  = false;
         snprintf(m_statusText, sizeof(m_statusText), "已停止");
         m_progressPct = 0.0f;
     }
