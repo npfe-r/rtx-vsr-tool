@@ -453,7 +453,7 @@ void MainWindow::RenderUI()
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        int nControls   = (m_audioMode == 2) ? 11 : 10;
+        int nControls   = 11;
         int nSeparators = 3;
         midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
     }
@@ -748,25 +748,24 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    if (m_audioMode == 2) {
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("码率");
-        ImGui::SameLine(labelW);
-        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
-        if (m_isRunning) ImGui::BeginDisabled();
-        static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
-        static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
-        int brIdx = 2;
-        for (int i = 0; i < 6; i++) {
-            if (m_audioBitrate == bitrateValues[i]) { brIdx = i; break; }
-        }
-        if (ImGui::Combo("##abr", &brIdx, bitrateNames, 6)) {
-            m_audioBitrate = bitrateValues[brIdx];
-            m_config.Get().audioBitrate = m_audioBitrate;
-        }
-        if (m_isRunning) ImGui::EndDisabled();
-        ImGui::PopItemWidth();
+    const bool audioBitrateDisabled = m_isRunning || (m_audioMode != 2);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("码率");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+    if (audioBitrateDisabled) ImGui::BeginDisabled();
+    static const char* bitrateNames[] = { "64k", "96k", "128k", "192k", "256k", "320k" };
+    static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
+    int brIdx = 2;
+    for (int i = 0; i < 6; i++) {
+        if (m_audioBitrate == bitrateValues[i]) { brIdx = i; break; }
     }
+    if (ImGui::Combo("##abr", &brIdx, bitrateNames, 6)) {
+        m_audioBitrate = bitrateValues[brIdx];
+        m_config.Get().audioBitrate = m_audioBitrate;
+    }
+    if (audioBitrateDisabled) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
 
     ImGui::End(); // ##settings
 
