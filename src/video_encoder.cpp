@@ -39,6 +39,7 @@ struct VideoEncoder::Impl {
     AVStream*        videoStream = nullptr;
     AVFrame*         frame   = nullptr;
     AVPixelFormat    pixFmt  = AV_PIX_FMT_NV12;
+    bool encCtxFailed = false;
     int frameCount = 0;
 
     // Audio remux (fallback)
@@ -86,10 +87,17 @@ static const char* GetDisplayName(const char* name) {
 static const char* GetContainerExt(int container) {
     switch (container) {
         case 0: return "mp4";
-        case 1: return "mkv";
+        case 1: return "matroska";
         case 2: return "mov";
         default: return "mp4";
     }
+}
+
+static const int NVENC_MAX_WIDTH  = 8192;
+static const int NVENC_MAX_HEIGHT = 8192;
+
+static bool IsResolutionWithinNVENC(int width, int height) {
+    return width <= NVENC_MAX_WIDTH && height <= NVENC_MAX_HEIGHT;
 }
 
 VideoEncoder::VideoEncoder() : m(new Impl) {}
@@ -104,32 +112,60 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
     const char* userDisplayName = GetDisplayName(GetEncoderName(cfg.codecId));
 
-    // Build ordered fallback list for this codecId.
-    // Start with the user's choice, then try encoders with better resolution support,
-    // and finally fall back to software.
     const char* fallbackNames[5];
     int fallbackCount = 0;
     {
-        // codecId 0=h264_nvenc, 1=hevc_nvenc, 2=av1_nvenc, 3=libx264, 4=libx265, 5=libaom-av1
-        if (cfg.codecId <= 2) {
-            if (cfg.codecId == 0) {
-                fallbackNames[0] = "h264_nvenc";
-                fallbackNames[1] = "hevc_nvenc";
-                fallbackNames[2] = "av1_nvenc";
-                fallbackNames[3] = "libx264";
-                fallbackNames[4] = "libx265";
-                fallbackCount = 5;
-            } else if (cfg.codecId == 1) {
-                fallbackNames[0] = "hevc_nvenc";
-                fallbackNames[1] = "av1_nvenc";
-                fallbackNames[2] = "libx265";
-                fallbackNames[3] = "libx264";
-                fallbackCount = 4;
+        bool nvencOversize = !IsResolutionWithinNVENC(cfg.width, cfg.height);
+        if (nvencOversize && cfg.codecId <= 2) {
+            EncLog("Resolution exceeds NVENC limit (8192), skipping hardware encoders");
+            if (statusCb) statusCb("分辨率超出NVENC上限(8192)，自动使用软件编码器");
+        }
+
+        if (cfg.container == 1) {
+            if (nvencOversize) {
+                fallbackNames[0] = "libaom-av1";
+                fallbackCount = 1;
             } else {
+                if (statusCb) statusCb("MKV: 仅支持 AV1 编码器");
                 fallbackNames[0] = "av1_nvenc";
                 fallbackNames[1] = "libaom-av1";
-                fallbackNames[2] = "libx265";
-                fallbackCount = 3;
+                fallbackCount = 2;
+            }
+        } else if (cfg.codecId <= 2) {
+            if (nvencOversize) {
+                if (cfg.codecId == 0) {
+                    fallbackNames[0] = "libx264";
+                    fallbackNames[1] = "libx265";
+                    fallbackCount = 2;
+                } else if (cfg.codecId == 1) {
+                    fallbackNames[0] = "libx265";
+                    fallbackNames[1] = "libx264";
+                    fallbackCount = 2;
+                } else {
+                    fallbackNames[0] = "libaom-av1";
+                    fallbackNames[1] = "libx265";
+                    fallbackCount = 2;
+                }
+            } else {
+                if (cfg.codecId == 0) {
+                    fallbackNames[0] = "h264_nvenc";
+                    fallbackNames[1] = "hevc_nvenc";
+                    fallbackNames[2] = "av1_nvenc";
+                    fallbackNames[3] = "libx264";
+                    fallbackNames[4] = "libx265";
+                    fallbackCount = 5;
+                } else if (cfg.codecId == 1) {
+                    fallbackNames[0] = "hevc_nvenc";
+                    fallbackNames[1] = "av1_nvenc";
+                    fallbackNames[2] = "libx265";
+                    fallbackNames[3] = "libx264";
+                    fallbackCount = 4;
+                } else {
+                    fallbackNames[0] = "av1_nvenc";
+                    fallbackNames[1] = "libaom-av1";
+                    fallbackNames[2] = "libx265";
+                    fallbackCount = 3;
+                }
             }
         } else {
             fallbackNames[0] = GetEncoderName(cfg.codecId);
@@ -305,7 +341,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         EncLog("avio_open OK");
     }
 
-    avformat_write_header(m->fmtCtx, NULL);
+    // Prevent matroska muxer from buffering unbounded packets
+    if (cfg.container == 1) {
+        AVDictionary* muxOpts = nullptr;
+        av_dict_set_int(&muxOpts, "cluster_time_limit", 1000000, 0);
+        av_dict_set_int(&muxOpts, "reserve_index_space", 1024, 0);
+        avformat_write_header(m->fmtCtx, &muxOpts);
+        av_dict_free(&muxOpts);
+    } else {
+        avformat_write_header(m->fmtCtx, NULL);
+    }
 
     // Allocate frame for encoding
     m->frame = av_frame_alloc();
@@ -355,10 +400,13 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
     m->frame->pts = m->frameCount++;
 
     __try {
-        if (avcodec_send_frame(m->encCtx, m->frame) < 0)
+        if (avcodec_send_frame(m->encCtx, m->frame) < 0) {
+            m->encCtxFailed = true;
             return false;
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         EncLog("SEH in avcodec_send_frame");
+        m->encCtxFailed = true;
         return false;
     }
 
@@ -373,6 +421,7 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         EncLog("SEH in avcodec_receive_packet");
+        m->encCtxFailed = true;
         av_packet_unref(&pkt);
         return false;
     }
@@ -380,14 +429,22 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
 }
 
 void VideoEncoder::Close() {
-    if (m->encCtx && m->videoStream && m->fmtCtx && m->fmtCtx->pb) {
-        avcodec_send_frame(m->encCtx, NULL);
-        AVPacket pkt = { 0 };
-        while (avcodec_receive_packet(m->encCtx, &pkt) >= 0) {
-            av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
-            pkt.stream_index = m->videoStream->index;
-            av_interleaved_write_frame(m->fmtCtx, &pkt);
-            av_packet_unref(&pkt);
+    if (m->encCtx && m->videoStream && m->fmtCtx && m->fmtCtx->pb && !m->encCtxFailed) {
+        __try {
+            avcodec_send_frame(m->encCtx, NULL);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in Close flush send_frame");
+        }
+        __try {
+            AVPacket pkt = { 0 };
+            while (avcodec_receive_packet(m->encCtx, &pkt) >= 0) {
+                av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
+                pkt.stream_index = m->videoStream->index;
+                av_interleaved_write_frame(m->fmtCtx, &pkt);
+                av_packet_unref(&pkt);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in Close flush receive_packet");
         }
     }
 
@@ -472,6 +529,7 @@ void VideoEncoder::Close() {
     if (m->audioSwr)      { swr_free(&m->audioSwr); m->audioSwr = nullptr; }
 
     m->frameCount = 0;
+    m->encCtxFailed = false;
     m->videoStream = nullptr;
     m->audioStream = nullptr;
     m->audioPackets = nullptr;

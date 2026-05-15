@@ -37,4 +37,6 @@ public:
 private:
     struct Impl;
     Impl* m;
+    bool m_eof = false;
+    bool m_drainSent = false;
 };

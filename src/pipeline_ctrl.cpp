@@ -205,6 +205,12 @@ void PipelineController::DecodeFunc() {
     LogDbg("--- Decode thread finished ---");
 }
 
+static void SafeCleanup(VideoEncoder& enc, VSRProcessor& vsr, VideoDecoder& dec) {
+    __try { enc.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in encoder.Close()"); }
+    __try { vsr.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in vsr.Shutdown()"); }
+    __try { dec.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in decoder.Close()"); }
+}
+
 void PipelineController::ThreadFuncImpl() {
     std::chrono::time_point<std::chrono::high_resolution_clock> lastReport;
     LogDbg("--- Pipeline GPU thread started ---");
@@ -487,9 +493,7 @@ void PipelineController::ThreadFuncImpl() {
 
 cleanup:
     LogStatus(onStatus, "清理资源...");
-    m_encoder.Close();
-    m_vsr.Shutdown();
-    m_decoder.Close();
+    SafeCleanup(m_encoder, m_vsr, m_decoder);
 
     for (auto* p : m_audioPackets) {
         if (p) { AVPacket* ap = static_cast<AVPacket*>(p); av_packet_free(&ap); }

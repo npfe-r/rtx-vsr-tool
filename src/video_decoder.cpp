@@ -34,8 +34,15 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
     char pathA[MAX_PATH];
     WideCharToMultiByte(CP_UTF8, 0, path, -1, pathA, MAX_PATH, NULL, NULL);
 
-    if (avformat_open_input(&m->fmtCtx, pathA, NULL, NULL) < 0)
+    AVDictionary* opts = nullptr;
+    av_dict_set_int(&opts, "probesize", 100 * 1024 * 1024, 0);
+    av_dict_set_int(&opts, "analyzeduration", 30 * AV_TIME_BASE, 0);
+
+    if (avformat_open_input(&m->fmtCtx, pathA, NULL, &opts) < 0) {
+        av_dict_free(&opts);
         return false;
+    }
+    av_dict_free(&opts);
     if (avformat_find_stream_info(m->fmtCtx, NULL) < 0) {
         avformat_close_input(&m->fmtCtx);
         return false;
@@ -90,48 +97,91 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info) {
         }
     }
 
+    m_eof = false;
+    m_drainSent = false;
+
     return true;
 }
 
 bool VideoDecoder::ReadFrameNV12(uint8_t* outData, int* outStride) {
-    if (!m->fmtCtx) return false;
+    if (!m->fmtCtx || !m->decCtx) return false;
 
-    AVPacket pkt;
-    while (av_read_frame(m->fmtCtx, &pkt) >= 0) {
-        int si = pkt.stream_index;
-        if (si == m->videoStreamIdx) {
-            if (avcodec_send_packet(m->decCtx, &pkt) == 0) {
-                int ret = avcodec_receive_frame(m->decCtx, m->decoded);
-                av_packet_unref(&pkt);
-                if (ret == 0) {
-                    // Convert to NV12 via swscale
-                    int dstStrides[2] = { m->targetW, m->targetW };
-                    uint8_t* dst[2] = { outData, outData + m->targetW * m->targetH };
-
-                    m->swsCtx = sws_getCachedContext(m->swsCtx,
-                        m->decoded->width, m->decoded->height,
-                        (AVPixelFormat)m->decoded->format,
-                        m->targetW, m->targetH, AV_PIX_FMT_NV12,
-                        SWS_FAST_BILINEAR, NULL, NULL, NULL);
-
-                    sws_scale(m->swsCtx, m->decoded->data, m->decoded->linesize,
-                              0, m->decoded->height, dst, dstStrides);
-
-                    outStride[0] = m->targetW;
-                    outStride[1] = m->targetW;
-                    return true;
-                }
-            }
-        } else if (m->audioPackets && si == m->audioStreamIdx) {
-            AVPacket* copy = av_packet_alloc();
-            av_packet_ref(copy, &pkt);
-            m->audioPackets->push_back(copy);
-            av_packet_unref(&pkt);
-        } else {
-            av_packet_unref(&pkt);
+    if (!m_drainSent) {
+        int recvRet = avcodec_receive_frame(m->decCtx, m->decoded);
+        if (recvRet == 0) {
+            goto convert;
         }
     }
-    return false;  // EOF or error
+
+    if (m_drainSent) {
+        return false;
+    }
+
+    if (!m_eof) {
+        AVPacket pkt;
+        int readRet;
+        while ((readRet = av_read_frame(m->fmtCtx, &pkt)) >= 0) {
+            int si = pkt.stream_index;
+            if (si == m->videoStreamIdx) {
+                int sendRet = avcodec_send_packet(m->decCtx, &pkt);
+                av_packet_unref(&pkt);
+                if (sendRet < 0) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "DEC: avcodec_send_packet error: %d", sendRet);
+                    OutputDebugStringA(buf);
+                    continue;
+                }
+                while (avcodec_receive_frame(m->decCtx, m->decoded) >= 0) {
+                    goto convert;
+                }
+            } else if (m->audioPackets && si == m->audioStreamIdx) {
+                AVPacket* copy = av_packet_alloc();
+                av_packet_ref(copy, &pkt);
+                m->audioPackets->push_back(copy);
+                av_packet_unref(&pkt);
+            } else {
+                av_packet_unref(&pkt);
+            }
+        }
+
+        m_eof = true;
+        if (readRet == AVERROR_EOF) {
+            OutputDebugStringA("DEC: EOF reached, draining decoder\n");
+        } else {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "DEC: av_read_frame error: %d", readRet);
+            OutputDebugStringA(buf);
+        }
+    }
+
+    if (m_eof && !m_drainSent) {
+        avcodec_send_packet(m->decCtx, NULL);
+        m_drainSent = true;
+        if (avcodec_receive_frame(m->decCtx, m->decoded) >= 0) {
+            goto convert;
+        }
+    }
+
+    return false;
+
+convert:
+    {
+        int dstStrides[2] = { m->targetW, m->targetW };
+        uint8_t* dst[2] = { outData, outData + m->targetW * m->targetH };
+
+        m->swsCtx = sws_getCachedContext(m->swsCtx,
+            m->decoded->width, m->decoded->height,
+            (AVPixelFormat)m->decoded->format,
+            m->targetW, m->targetH, AV_PIX_FMT_NV12,
+            SWS_FAST_BILINEAR, NULL, NULL, NULL);
+
+        sws_scale(m->swsCtx, m->decoded->data, m->decoded->linesize,
+                  0, m->decoded->height, dst, dstStrides);
+
+        outStride[0] = m->targetW;
+        outStride[1] = m->targetW;
+        return true;
+    }
 }
 
 void VideoDecoder::Close() {
@@ -143,6 +193,8 @@ void VideoDecoder::Close() {
     m->videoStreamIdx = -1;
     m->audioStreamIdx = -1;
     m->swsCtx = nullptr;
+    m_eof = false;
+    m_drainSent = false;
 }
 
 void VideoDecoder::SetAudioPacketQueue(void* queue) {
