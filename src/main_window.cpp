@@ -722,8 +722,11 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 75);
     if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0))
+    if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0)) {
+        if (m_videoInfo.fps > 0 && m_outputFps > (int)m_videoInfo.fps)
+            m_outputFps = (int)m_videoInfo.fps;
         m_config.Get().outputFps = m_outputFps;
+    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
@@ -968,6 +971,11 @@ void MainWindow::OnSelectInput()
                      m_videoInfo.fps,
                      m_videoInfo.hasAudio ? "有音频" : "无音频");
             decoder.Close();
+
+            if (m_videoInfo.fps > 0 && m_outputFps > (int)m_videoInfo.fps) {
+                m_outputFps = (int)m_videoInfo.fps;
+                m_config.Get().outputFps = m_outputFps;
+            }
         } else {
             snprintf(m_inputInfo, sizeof(m_inputInfo), "无法打开文件");
         }
