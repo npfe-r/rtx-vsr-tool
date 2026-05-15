@@ -42,6 +42,7 @@ private:
     void    OnPipelineProgress(const PipelineProgress& p);
     void    OnPipelineError(const wchar_t* msg);
     void    OnPipelineCompleted();
+    void    OnPipelineStatus(const char* msg);
     void    LoadConfigToUI();
     void    SaveUIToConfig();
     void    EnumGpus();

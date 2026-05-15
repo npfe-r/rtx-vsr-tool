@@ -25,6 +25,7 @@ MainWindow::MainWindow()
     m_pipeline.onProgress  = [this](const PipelineProgress& p) { OnPipelineProgress(p); };
     m_pipeline.onError     = [this](const wchar_t* msg)        { OnPipelineError(msg); };
     m_pipeline.onCompleted = [this]()                          { OnPipelineCompleted(); };
+    m_pipeline.onStatus    = [this](const char* msg)           { OnPipelineStatus(msg); };
 }
 
 MainWindow::~MainWindow()
@@ -80,6 +81,16 @@ bool MainWindow::InitD3D11()
         snprintf(buf, sizeof(buf), "D3D11CreateDeviceAndSwapChain failed: HRESULT=0x%08lX", hr);
         OutputDebugStringA(buf);
         OutputDebugStringA("\n");
+
+        char logPath[MAX_PATH];
+        GetModuleFileNameA(NULL, logPath, sizeof(logPath));
+        char* slash = strrchr(logPath, '\\');
+        if (slash) *(slash + 1) = '\0';
+        strcat_s(logPath, "pipeline_debug.log");
+        FILE* f = nullptr;
+        fopen_s(&f, logPath, "a");
+        if (f) { fprintf(f, "%s\n", buf); fflush(f); fclose(f); }
+
         HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
         if (hCon && hCon != INVALID_HANDLE_VALUE) {
             DWORD wrote;
@@ -280,6 +291,16 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         }
         m_isRunning = false;
         m_isPaused  = false;
+        return 0;
+    }
+
+    // --- Pipeline status message (posted from worker thread) ---
+    case WM_USER + 4: {
+        auto* statusMsg = (char*)wParam;
+        if (statusMsg) {
+            snprintf(m_statusText, sizeof(m_statusText), "%s", statusMsg);
+            delete[] statusMsg;
+        }
         return 0;
     }
 
@@ -1034,6 +1055,14 @@ void MainWindow::OnPipelineError(const wchar_t* msg)
 void MainWindow::OnPipelineCompleted()
 {
     PostMessageW(m_hWnd, WM_USER + 3, 0, 0);
+}
+
+void MainWindow::OnPipelineStatus(const char* msg)
+{
+    size_t len = strlen(msg) + 1;
+    char* copy = new char[len];
+    memcpy(copy, msg, len);
+    PostMessageW(m_hWnd, WM_USER + 4, (WPARAM)copy, 0);
 }
 
 // ============================================================================

@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cstdint>
 #include <vector>
+#include <functional>
 
 struct EncodeConfig {
     const wchar_t* outputPath = L"";
@@ -27,12 +28,14 @@ struct EncodeConfig {
     void* audioCodecPar = nullptr;    // AVCodecParameters* (copied from source)
 };
 
+using OnEncoderStatus = std::function<void(const char*)>;
+
 class VideoEncoder {
 public:
     VideoEncoder();
     ~VideoEncoder();
 
-    bool Open(const EncodeConfig& cfg);
+    bool Open(const EncodeConfig& cfg, OnEncoderStatus statusCb = nullptr);
     bool WriteFrameNV12(const uint8_t* data, int yStride, int uvStride);
     void Close();
     bool IsOpen() const;

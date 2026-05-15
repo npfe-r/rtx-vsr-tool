@@ -77,6 +77,7 @@ public:
     std::function<void(const PipelineProgress&)> onProgress;
     std::function<void(const wchar_t* msg)> onError;
     std::function<void()> onCompleted;
+    std::function<void(const char* msg)> onStatus;
 
 private:
     void ThreadFunc();

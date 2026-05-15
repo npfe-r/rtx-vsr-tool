@@ -12,7 +12,7 @@ extern "C" {
 static void LogDbg(const char* msg) {
     OutputDebugStringA(msg);
     OutputDebugStringA("\n");
-#ifdef _DEBUG
+
     char logPath[MAX_PATH];
     GetModuleFileNameA(NULL, logPath, sizeof(logPath));
     char* slash = strrchr(logPath, '\\');
@@ -21,13 +21,18 @@ static void LogDbg(const char* msg) {
     FILE* f = nullptr;
     fopen_s(&f, logPath, "a");
     if (f) { fprintf(f, "%s\n", msg); fflush(f); fclose(f); }
-#endif
+
     HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
     if (hCon && hCon != INVALID_HANDLE_VALUE) {
         DWORD wrote;
         WriteConsoleA(hCon, msg, (DWORD)strlen(msg), &wrote, nullptr);
         WriteConsoleA(hCon, "\n", 1, &wrote, nullptr);
     }
+}
+
+static void LogStatus(const std::function<void(const char*)>& statusCb, const char* msg) {
+    LogDbg(msg);
+    if (statusCb) statusCb(msg);
 }
 
 static LONG WINAPI PipelineUnhandledFilter(_EXCEPTION_POINTERS* ep) {
@@ -210,7 +215,7 @@ void PipelineController::ThreadFuncImpl() {
     }
 
     // ---- CUDA runtime init ----
-    LogDbg("Step: CUDA runtime init...");
+    LogStatus(onStatus, "CUDA 运行时初始化...");
     {
         cudaError_t initErr = cudaSetDevice(m_cfg.gpuIndex);
         if (initErr != cudaSuccess) {
@@ -221,11 +226,11 @@ void PipelineController::ThreadFuncImpl() {
         }
         cudaFree(0);
         CudaFailed("cudaFree(0)");
-        LogDbg("CUDA runtime initialized");
+        LogStatus(onStatus, "CUDA 运行时初始化完成");
     }
 
     // ---- Open decoder ----
-    LogDbg("Step: Open decoder...");
+    LogStatus(onStatus, "打开解码器...");
     VideoInfo info;
     if (!m_decoder.Open(m_cfg.inputPath.c_str(), &info)) {
         LogDbg("Failed to open input file");
@@ -233,7 +238,7 @@ void PipelineController::ThreadFuncImpl() {
         m_state.store(PipelineState::Error);
         return;
     }
-    LogDbg("Decoder opened successfully");
+    LogStatus(onStatus, "解码器打开成功");
 
     m_srcW = info.width;
     m_srcH = info.height;
@@ -245,7 +250,7 @@ void PipelineController::ThreadFuncImpl() {
     double outFps = m_cfg.outputFps > 0 ? (double)m_cfg.outputFps : m_srcFps;
 
     // ---- Allocate frame slots (pinned CPU memory + GPU + per-slot streams) ----
-    LogDbg("Step: Allocate frame slots...");
+    LogStatus(onStatus, "分配帧缓冲区...");
     size_t nv12Size     = (size_t)m_srcW * m_srcH * 3 / 2;
     size_t nv12OutSize  = (size_t)m_dstW * m_dstH * 3 / 2;
     size_t rgbaSrcSize  = (size_t)m_srcW * m_srcH * 4;
@@ -288,24 +293,24 @@ void PipelineController::ThreadFuncImpl() {
 
         m_slots[i].state.store(SlotState::Empty);
     }
-    LogDbg("Frame slots allocated (pinned host memory + per-slot non-blocking streams)");
+    LogStatus(onStatus, "帧缓冲区分配完成");
 
     // ---- Audio ----
     m_audioPackets.clear();
     m_decoder.SetAudioPacketQueue(&m_audioPackets);
 
     // ---- Open VSR (SEH-safe) ----
-    LogDbg("Step: Initialize VSR (NGX)...");
+    LogStatus(onStatus, "初始化 VSR (NGX)...");
     if (!SafeVSRInit(&m_vsr, m_cfg.gpuIndex)) {
         LogDbg("VSR init failed");
         if (onError) onError(L"VSR 初始化失败，请检查 GPU 和驱动（需要 550+）");
         m_state.store(PipelineState::Error);
         goto cleanup;
     }
-    LogDbg("VSR initialized");
+    LogStatus(onStatus, "VSR 初始化完成");
 
     // ---- Open encoder ----
-    LogDbg("Step: Open encoder...");
+    LogStatus(onStatus, "打开编码器...");
     {
         EncodeConfig encCfg;
         wchar_t outputPath[MAX_PATH];
@@ -327,14 +332,14 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.audioPackets  = &m_audioPackets;
         encCfg.audioCodecPar = m_decoder.GetAudioCodecPar();
 
-        if (!m_encoder.Open(encCfg)) {
+        if (!m_encoder.Open(encCfg, onStatus)) {
             LogDbg("Failed to open encoder");
             if (onError) onError(L"无法打开编码器");
             m_state.store(PipelineState::Error);
             goto cleanup;
         }
     }
-    LogDbg("Encoder opened");
+    LogStatus(onStatus, "编码器打开成功");
 
     // ---- Launch decode thread ----
     m_decodeDone.store(false);
@@ -345,7 +350,7 @@ void PipelineController::ThreadFuncImpl() {
 
     // ---- GPU thread main loop (VSR + encode) ----
     m_state.store(PipelineState::Running);
-    LogDbg("Step: Entering GPU processing loop");
+    LogStatus(onStatus, "开始 GPU 处理循环");
 
     VSRFrameContext vsrCtx;
     vsrCtx.vsr     = &m_vsr;
@@ -481,7 +486,7 @@ void PipelineController::ThreadFuncImpl() {
     LogDbg("Decode thread joined");
 
 cleanup:
-    LogDbg("Cleanup: freeing resources");
+    LogStatus(onStatus, "清理资源...");
     m_encoder.Close();
     m_vsr.Shutdown();
     m_decoder.Close();
@@ -491,7 +496,7 @@ cleanup:
     }
     m_audioPackets.clear();
 
-    LogDbg("Cleanup: freeing GPU memory and streams");
+    LogStatus(onStatus, "释放 GPU 内存和流...");
     for (int i = 0; i < NUM_SLOTS; i++) {
         if (m_slots[i].nv12_cpu)     { cudaFreeHost(m_slots[i].nv12_cpu); m_slots[i].nv12_cpu = nullptr; }
         if (m_slots[i].nv12_out_cpu) { cudaFreeHost(m_slots[i].nv12_out_cpu); m_slots[i].nv12_out_cpu = nullptr; }
@@ -526,6 +531,7 @@ bool PipelineController::Start(const PipelineConfig& cfg) {
     }
     m_thread = std::thread(&PipelineController::ThreadFunc, this);
     LogDbg("Pipeline thread started");
+    LogStatus(onStatus, "管道线程已启动");
     return true;
 }
 
@@ -553,5 +559,5 @@ void PipelineController::Stop() {
     if (m_thread.joinable()) {
         m_thread.join();
     }
-    LogDbg("Pipeline stopped");
+    LogStatus(onStatus, "管道已停止");
 }
