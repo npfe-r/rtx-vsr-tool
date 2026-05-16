@@ -796,8 +796,10 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* containerNames[] = { "MP4", "MOV" };
-    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 2))
+    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 2)) {
         m_config.Get().containerFormat = m_containerFormat;
+        UpdateOutputExtension();
+    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::Separator();
@@ -1001,8 +1003,24 @@ void MainWindow::OnSelectInput()
     }
 }
 
+void MainWindow::UpdateOutputExtension()
+{
+    wchar_t outPath[MAX_PATH];
+    widen(m_outputPath, outPath, MAX_PATH);
+    wchar_t* dot = wcsrchr(outPath, L'.');
+    if (dot) {
+        static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mov" };
+        int idx = m_containerFormat;
+        if (idx < 0 || idx > 1) idx = 0;
+        wcscpy(dot, containerExt[idx]);
+    }
+    narrow(outPath, m_outputPath, sizeof(m_outputPath));
+}
+
 void MainWindow::OnSelectOutput()
 {
+    UpdateOutputExtension();
+
     wchar_t path[MAX_PATH] = {};
     wchar_t initPath[MAX_PATH] = {};
     widen(m_outputPath, initPath, MAX_PATH);

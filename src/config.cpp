@@ -30,7 +30,7 @@ void Config::Load() {
     m_config.fixedHeight  = r(L"Params", L"FixedHeight", 2160);
     m_config.encoderIndex = r(L"Params", L"Encoder", 0);
     m_config.crf          = r(L"Params", L"CRF", 18);
-    m_config.encoderSpeed = r(L"Params", L"Speed", 2);
+    m_config.encoderSpeed = r(L"Params", L"Speed", 3);
     m_config.gpuIndex     = r(L"Params", L"GPU", 0);
     m_config.containerFormat = r(L"Params", L"Container", 0);
     m_config.outputFps    = r(L"Params", L"OutputFps", 0);

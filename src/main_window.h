@@ -49,6 +49,7 @@ private:
     void    LoadConfigToUI();
     void    SaveUIToConfig();
     void    EnumGpus();
+    void    UpdateOutputExtension();
 
     HWND      m_hWnd   = nullptr;
     HINSTANCE m_hInst  = nullptr;
@@ -67,7 +68,7 @@ private:
     int     m_outputHeight     = 2160;
     int     m_encoderIndex     = 0;
     int     m_crf              = 18;
-    int     m_encoderSpeed     = 2;
+    int     m_encoderSpeed     = 3;
     int     m_gpuIndex         = 0;
     int     m_containerFormat  = 0;
     int     m_audioMode        = 1;

@@ -36,7 +36,7 @@ struct PipelineConfig {
     int outputHeight = 0;
     int encoderIndex = 0;
     int crf = 18;
-    int encoderSpeed = 2;
+    int encoderSpeed = 3;
     int gpuIndex = 0;
     int container = 0;
     int outputFps = 0;
