@@ -267,6 +267,12 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
             av_opt_set_int(m->encCtx->priv_data, "bframes", 0, 0);
         } else if (strcmp(encName, "libaom-av1") == 0) {
+            // libaom maps avctx->thread_count directly to its internal
+            // g_threads (tile thread pool).  Default is 1 from
+            // avcodec_alloc_context3, which limits tile encoding to a
+            // single thread regardless of tile-count or row-mt settings.
+            // Setting to 0 lets the encoder's init function use av_cpu_count().
+            m->encCtx->thread_count = 0;
             int cpuUsed = 0;
             const char* usage = "good";
             switch (idx) {
@@ -282,8 +288,15 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
             av_opt_set_int(m->encCtx->priv_data, "arnr-maxframes", 0, 0);
             av_opt_set_int(m->encCtx->priv_data, "arnr-strength", 0, 0);
-            av_opt_set_int(m->encCtx->priv_data, "tile-columns", cfg.width >= 3840 ? 1 : 0, 0);
-            av_opt_set_int(m->encCtx->priv_data, "tile-rows", cfg.height >= 2160 ? 1 : 0, 0);
+            // Tile parallelism: tile-columns/rows = log2 of tile count per dimension.
+            // Aggressive tiling keeps CPU cores fed — each tile is independent.
+            // Min tile size ~320px well above libaom's 64px superblock minimum.
+            int tc = 0, tr = 0;
+            if (cfg.width >= 1920)       tc = 2;  // 4 column tiles
+            else if (cfg.width >= 1280)  tc = 1;  // 2 column tiles
+            if (cfg.height >= 1080)      tr = 1;  // 2 row tiles (4K → 8 tiles, 1080p → 4 tiles)
+            av_opt_set_int(m->encCtx->priv_data, "tile-columns", tc, 0);
+            av_opt_set_int(m->encCtx->priv_data, "tile-rows", tr, 0);
         } else if (strcmp(encName, "libsvtav1") == 0) {
             int svtPreset = 8;
             switch (idx) {
