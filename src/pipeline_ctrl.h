@@ -14,18 +14,19 @@
 #include "video_decoder.h"
 #include "vsr_processor.h"
 #include "video_encoder.h"
+#include "color_types.h"
 
 extern "C" void launch_nv12_to_rgba(
     const uint8_t* y_plane, int y_pitch,
     const uint8_t* uv_plane, int uv_pitch,
     uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, cudaStream_t stream);
+    int w, int h, cudaStream_t stream, int colorMatrix);
 
 extern "C" void launch_rgba_to_nv12(
     const uint8_t* rgba, int rgba_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream);
+    int w, int h, cudaStream_t stream, int colorMatrix);
 
 struct PipelineConfig {
     std::wstring inputPath;
@@ -132,4 +133,11 @@ private:
     std::condition_variable m_pauseCv;
     PipelineConfig m_cfg;
     char m_decodeMode[16] = {};
+
+    // Colour metadata from source (used for CUDA kernels + encoder)
+    int m_colorMatrix = COLOR_MATRIX_BT709;   // ColorMatrix enum
+    int m_avColorPrimaries = 2;                // AVCOL_PRI_BT709
+    int m_avColorTransfer   = 2;               // AVCOL_TRC_BT709
+    int m_avColorSpace      = 1;               // AVCOL_SPC_BT709
+    int m_avColorRange      = 0;               // AVCOL_RANGE_UNSPECIFIED
 };

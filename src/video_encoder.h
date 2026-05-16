@@ -26,6 +26,12 @@ struct EncodeConfig {
     int audioBitrate = 128;         // kbps (AAC)
     void* audioPackets = nullptr;     // std::vector<AVPacket*>*
     void* audioCodecPar = nullptr;    // AVCodecParameters* (copied from source)
+
+    // Colour metadata (FFmpeg AVColor* enum values, 0 = use defaults below)
+    int colorPrimaries = 0;  // 0 → AVCOL_PRI_BT709  (2)
+    int colorTransfer  = 0;  // 0 → AVCOL_TRC_BT709  (2)
+    int colorSpace     = 0;  // 0 → AVCOL_SPC_BT709  (1)
+    int colorRange     = 0;  // 0 → AVCOL_RANGE_UNSPECIFIED  (0 → encoder = MPEG)
 };
 
 using OnEncoderStatus = std::function<void(const char*)>;

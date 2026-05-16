@@ -20,6 +20,15 @@ struct VideoInfo {
     // Source PTS timebase (from video stream)
     int srcTimeBaseNum = 1;
     int srcTimeBaseDen = 30;
+
+    // Source colour metadata (from AVCodecContext / VUI).  Set to the
+    // FFmpeg AVColor* enum values — undefined/unset fields stay at 0.
+    // Used downstream for CUDA matrix selection and encoder metadata.
+    int avColorPrimaries = 0;  // AVColorPrimaries  (0 = unspecified)
+    int avColorTransfer  = 0;  // AVColorTransferCharacteristic
+    int avColorSpace     = 0;  // AVColorSpace  (0 = RGB, 1 = BT.709, 5/6 = BT.601, 9 = BT.2020)
+    int avColorRange     = 0;  // AVColorRange  (0 = unspecified, 1 = limited, 2 = full)
+    int srcColorMatrix   = 1;  // ColorMatrix enum — derived from avColorSpace (default BT.709)
 };
 
 class VideoDecoder {

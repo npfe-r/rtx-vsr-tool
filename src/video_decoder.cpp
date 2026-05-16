@@ -1,4 +1,5 @@
 #include "video_decoder.h"
+#include "color_types.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -9,6 +10,35 @@ extern "C" {
 }
 
 #include <vector>
+
+// ── Helpers for colour-space mapping ───────────────────────────────
+
+// Map FFmpeg AVColorSpace to our simplified ColorMatrix enum.
+// Defaults to BT.709 (the most common for HD video) when unspecified.
+static int AvColorSpaceToMatrix(int avCS) {
+    switch (avCS) {
+        case 5:  // AVCOL_SPC_BT470BG
+        case 6:  // AVCOL_SPC_SMPTE170M
+            return COLOR_MATRIX_BT601;
+        case 1:  // AVCOL_SPC_BT709
+            return COLOR_MATRIX_BT709;
+        case 9:  // AVCOL_SPC_BT2020_NCL
+        case 10: // AVCOL_SPC_BT2020_CL
+            return COLOR_MATRIX_BT2020;
+        default:
+            return COLOR_MATRIX_BT709;  // safe default for modern content
+    }
+}
+
+// Map AVColorSpace to libswscale SWS_CS_* constant for sws_setColorspaceDetails.
+static int AvColorSpaceToSWS(int avCS) {
+    switch (avCS) {
+        case 5:  case 6:  return 0;          // SWS_CS_ITU601
+        case 1:           return 1;          // SWS_CS_ITU709
+        case 9:  case 10: return 9;          // SWS_CS_BT2020
+        default:          return 1;          // default BT.709
+    }
+}
 
 static AVPixelFormat g_hw_pix_fmt = AV_PIX_FMT_NONE;
 
@@ -206,6 +236,21 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
     m_eof = false;
     m_drainSent = false;
 
+    // ── Read source colour metadata ────────────────────────────────
+    info->avColorPrimaries = m->decCtx->color_primaries;
+    info->avColorTransfer  = m->decCtx->color_trc;
+    info->avColorSpace     = m->decCtx->colorspace;
+    info->avColorRange     = m->decCtx->color_range;
+    info->srcColorMatrix   = AvColorSpaceToMatrix(m->decCtx->colorspace);
+    {
+        char _b[256]; snprintf(_b, sizeof(_b),
+            "DEC: color: primaries=%d transfer=%d space=%d range=%d  → matrix=%d",
+            info->avColorPrimaries, info->avColorTransfer,
+            info->avColorSpace, info->avColorRange,
+            AvColorSpaceToMatrix(info->avColorSpace));
+        OutputDebugStringA(_b); OutputDebugStringA("\n");
+    }
+
     return true;
 }
 
@@ -218,9 +263,20 @@ bool VideoDecoder::ReadFrameNV12(uint8_t* outData, int* outStride) {
     int h = m->targetH;
 
     if (!m->swsCtx) {
+        int srcCS = AvColorSpaceToSWS(m->decCtx->colorspace);
         m->swsCtx = sws_getContext(w, h, m->decCtx->pix_fmt,
                                     w, h, AV_PIX_FMT_NV12,
                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (m->swsCtx) {
+            int srcRange = (m->decCtx->color_range == 2) ? 1 : 0;  // 1 = full range
+            // Destination NV12 preserves the source colour matrix so the
+            // downstream CUDA kernel (which selects the same matrix) can
+            // convert back to RGB without a matrix mismatch.
+            sws_setColorspaceDetails(m->swsCtx,
+                sws_getCoefficients(srcCS), srcRange,
+                sws_getCoefficients(srcCS), 0,   // dst = same matrix, limited
+                0, 1 << 16, 1 << 16);
+        }
         if (!m->swsCtx) return false;
     }
 

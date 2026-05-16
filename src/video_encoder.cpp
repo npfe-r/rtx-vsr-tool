@@ -163,9 +163,17 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     m->encCtx->framerate = fpsRat;
     m->encCtx->pix_fmt   = m->pixFmt = IsNVENCByName(encName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
     m->encCtx->color_range = AVCOL_RANGE_MPEG;
-    m->encCtx->color_primaries = AVCOL_PRI_BT709;
-    m->encCtx->color_trc = AVCOL_TRC_BT709;
-    m->encCtx->colorspace = AVCOL_SPC_BT709;
+    // Use source colour metadata when available, fall back to BT.709.
+    // "Unspecified" in FFmpeg is either 0 (Reserved) or 2.
+    m->encCtx->color_primaries =
+        (cfg.colorPrimaries > 0 && cfg.colorPrimaries != 2)
+        ? (AVColorPrimaries)cfg.colorPrimaries : AVCOL_PRI_BT709;
+    m->encCtx->color_trc =
+        (cfg.colorTransfer > 0 && cfg.colorTransfer != 2)
+        ? (AVColorTransferCharacteristic)cfg.colorTransfer : AVCOL_TRC_BT709;
+    m->encCtx->colorspace =
+        (cfg.colorSpace > 0 && cfg.colorSpace != 2)
+        ? (AVColorSpace)cfg.colorSpace : AVCOL_SPC_BT709;
     m->encCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
 
     if (IsNVENCByName(encName)) {

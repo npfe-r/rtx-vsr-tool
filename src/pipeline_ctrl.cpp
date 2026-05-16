@@ -176,7 +176,7 @@ void PipelineController::DecodeFunc() {
                 yDev, yPitch,
                 uvDev, uvPitch,
                 slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream);
+                m_srcW, m_srcH, slot.stream, m_colorMatrix);
         } else {
             int stride = m_srcW;
             if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, &stride)) {
@@ -197,7 +197,7 @@ void PipelineController::DecodeFunc() {
                 slot.d_nv12, stride,
                 slot.d_nv12 + m_srcW * m_srcH, stride,
                 slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream);
+                m_srcW, m_srcH, slot.stream, m_colorMatrix);
         }
 
         cudaStreamSynchronize(slot.stream);
@@ -285,6 +285,13 @@ void PipelineController::ThreadFuncImpl() {
     m_srcTimeBaseNum = info.srcTimeBaseNum;
     m_srcTimeBaseDen = info.srcTimeBaseDen;
 
+    // Store source colour metadata
+    m_colorMatrix       = info.srcColorMatrix;
+    m_avColorPrimaries  = info.avColorPrimaries;
+    m_avColorTransfer  = info.avColorTransfer;
+    m_avColorSpace     = info.avColorSpace;
+    m_avColorRange     = info.avColorRange;
+
     {
         char buf[256];
         snprintf(buf, sizeof(buf),
@@ -293,6 +300,10 @@ void PipelineController::ThreadFuncImpl() {
             info.srcTimeBaseNum, info.srcTimeBaseDen,
             info.videoCodecName, info.hasAudio ? info.audioCodecName : "none");
         LogMsg("PIP: ",buf);
+        { char _b[128]; snprintf(_b, sizeof(_b),
+            "PIP: color: avCS=%d avRange=%d → matrix=%d",
+            info.avColorSpace, info.avColorRange, m_colorMatrix);
+          LogMsg("PIP: ",_b); }
     }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
@@ -394,6 +405,11 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.audioChannels = info.audioChannels;
         encCfg.audioPackets  = &m_audioPackets;
         encCfg.audioCodecPar = m_decoder.GetAudioCodecPar();
+
+        encCfg.colorPrimaries = m_avColorPrimaries;
+        encCfg.colorTransfer  = m_avColorTransfer;
+        encCfg.colorSpace     = m_avColorSpace;
+        encCfg.colorRange     = m_avColorRange;
 
         std::string lastEncErr;
         auto encStatus = [&](const char* msg) {
@@ -535,7 +551,7 @@ void PipelineController::ThreadFuncImpl() {
                     slot.d_rgba_dst, m_dstW * 4,
                     encY, encYPitch,
                     encUV, encUVPitch,
-                    m_dstW, m_dstH, slot.stream);
+                    m_dstW, m_dstH, slot.stream, m_colorMatrix);
                 cudaStreamSynchronize(slot.stream);
                 if (CudaFailed("GPU: RGBA->NV12 (CUDA enc)")) {
                     LogMsg("PIP: ","GPU: CUDA error in RGBA->NV12 (CUDA enc)");
@@ -554,7 +570,7 @@ void PipelineController::ThreadFuncImpl() {
                     slot.d_rgba_dst, m_dstW * 4,
                     slot.d_nv12_out, m_dstW,
                     slot.d_nv12_out + m_dstW * m_dstH, m_dstW,
-                    m_dstW, m_dstH, slot.stream);
+                    m_dstW, m_dstH, slot.stream, m_colorMatrix);
                 cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, nv12OutSize,
                                 cudaMemcpyDeviceToHost, slot.stream);
                 cudaStreamSynchronize(slot.stream);
