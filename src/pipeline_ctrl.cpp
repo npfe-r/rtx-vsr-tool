@@ -6,43 +6,24 @@
 #include <windows.h>
 #include <exception>
 
+#include "debug_util.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-static void LogDbg(const char* msg) {
-    OutputDebugStringA(msg);
-    OutputDebugStringA("\n");
-
-    char logPath[MAX_PATH];
-    GetModuleFileNameA(NULL, logPath, sizeof(logPath));
-    char* slash = strrchr(logPath, '\\');
-    if (slash) *(slash + 1) = '\0';
-    strcat_s(logPath, "pipeline_debug.log");
-    FILE* f = nullptr;
-    fopen_s(&f, logPath, "a");
-    if (f) { fprintf(f, "%s\n", msg); fflush(f); fclose(f); }
-
-    HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hCon && hCon != INVALID_HANDLE_VALUE) {
-        DWORD wrote;
-        WriteConsoleA(hCon, msg, (DWORD)strlen(msg), &wrote, nullptr);
-        WriteConsoleA(hCon, "\n", 1, &wrote, nullptr);
-    }
-}
-
 static void LogStatus(const std::function<void(const char*)>& statusCb, const char* msg) {
-    LogDbg(msg);
+    LogMsg("PIP: ",msg);
     if (statusCb) statusCb(msg);
 }
 
 static LONG WINAPI PipelineUnhandledFilter(_EXCEPTION_POINTERS* ep) {
-    LogDbg("!!! UNHANDLED EXCEPTION in pipeline thread !!!");
+    LogMsg("PIP: ","!!! UNHANDLED EXCEPTION in pipeline thread !!!");
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     char buf[128];
     snprintf(buf, sizeof(buf), "ExceptionCode=0x%08lX addr=%p",
              code, ep->ExceptionRecord->ExceptionAddress);
-    LogDbg(buf);
+    LogMsg("PIP: ",buf);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -56,13 +37,13 @@ struct VSRFrameContext {
 
 static bool SafeVSRInit(VSRProcessor* vsr, int gpuIndex)
 {
-    LogDbg("  -> calling vsr->Initialize()...");
+    LogMsg("PIP: ","  -> calling vsr->Initialize()...");
     __try {
         bool ok = vsr->Initialize(gpuIndex);
-        LogDbg("  -> vsr->Initialize() returned");
+        LogMsg("PIP: ","  -> vsr->Initialize() returned");
         return ok;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogDbg("!!! SEH CRASH in VSR Initialize !!!");
+        LogMsg("PIP: ","!!! SEH CRASH in VSR Initialize !!!");
         return false;
     }
 }
@@ -75,7 +56,7 @@ static bool SafeVSRProcess(VSRFrameContext* ctx)
                                        ctx->dstW, ctx->dstH,
                                        ctx->quality);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogDbg("!!! SEH CRASH in VSR ProcessFrame !!!");
+        LogMsg("PIP: ","!!! SEH CRASH in VSR ProcessFrame !!!");
         return false;
     }
 }
@@ -102,7 +83,7 @@ static bool CudaFailed(const char* tag) {
     if (err != cudaSuccess) {
         char buf[256];
         snprintf(buf, sizeof(buf), "CUDA error at %s: %s", tag, cudaGetErrorString(err));
-        LogDbg(buf);
+        LogMsg("PIP: ",buf);
         return true;
     }
     return false;
@@ -113,9 +94,9 @@ void PipelineController::ThreadFunc() {
 
     __try {
         ThreadFuncImpl();
-        LogDbg("ThreadFunc: ThreadFuncImpl returned normally");
+        LogMsg("PIP: ","ThreadFunc: ThreadFuncImpl returned normally");
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        LogDbg("SEH EXCEPTION CAUGHT in pipeline thread!");
+        LogMsg("PIP: ","SEH EXCEPTION CAUGHT in pipeline thread!");
         for (int i = 0; i < NUM_SLOTS; i++) {
             if (m_slots[i].nv12_cpu)     { cudaFreeHost(m_slots[i].nv12_cpu); m_slots[i].nv12_cpu = nullptr; }
             if (m_slots[i].nv12_out_cpu) { cudaFreeHost(m_slots[i].nv12_out_cpu); m_slots[i].nv12_out_cpu = nullptr; }
@@ -128,15 +109,15 @@ void PipelineController::ThreadFunc() {
         }
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
         m_state.store(PipelineState::Error);
-        LogDbg("ThreadFunc SEH handler done");
+        LogMsg("PIP: ","ThreadFunc SEH handler done");
     }
 }
 
 void PipelineController::DecodeFunc() {
-    LogDbg("--- Decode thread started ---");
+    LogMsg("PIP: ","--- Decode thread started ---");
 
     cudaSetDevice(m_cfg.gpuIndex);
-    LogDbg("Decode: CUDA device set");
+    LogMsg("PIP: ","Decode: CUDA device set");
 
     // GPU-only decode path: NVDEC outputs GPU device pointers directly.
     // The decoder maintains an internal PTS reorder buffer (depth=8) and
@@ -146,13 +127,10 @@ void PipelineController::DecodeFunc() {
     while (true) {
         if (m_state.load() == PipelineState::Paused) {
             std::unique_lock<std::mutex> lk(m_pauseMutex);
-            m_pauseCv.wait(lk, [] { return true; });
-        }
-        while (m_state.load() == PipelineState::Paused) {
-            Sleep(10);
+            m_pauseCv.wait(lk, [this] { return m_state.load() != PipelineState::Paused; });
         }
         if (m_state.load() != PipelineState::Running) {
-            LogDbg("Decode: state not Running, exiting");
+            LogMsg("PIP: ","Decode: state not Running, exiting");
             break;
         }
 
@@ -178,7 +156,7 @@ void PipelineController::DecodeFunc() {
         const uint8_t* uvDev = nullptr;
         int yPitch = 0, uvPitch = 0;
         if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch, &slot.pts)) {
-            LogDbg("Decode GPU: EOF or error");
+            LogMsg("PIP: ","Decode GPU: EOF or error");
             slot.state.store(SlotState::Empty);
             m_decodeDone.store(true);
             m_slotCv.notify_one();
@@ -200,7 +178,7 @@ void PipelineController::DecodeFunc() {
 
         cudaStreamSynchronize(slot.stream);
         if (CudaFailed("Decode: NV12->RGBA")) {
-            LogDbg("Decode: CUDA error in NV12->RGBA");
+            LogMsg("PIP: ","Decode: CUDA error in NV12->RGBA");
             m_state.store(PipelineState::Error);
             slot.state.store(SlotState::Empty);
             m_slotCv.notify_one();
@@ -214,15 +192,15 @@ void PipelineController::DecodeFunc() {
         if (decFrameIdx % 100 == 0) {
             char buf[128];
             snprintf(buf, sizeof(buf), "Decode: processed %d frames so far", decFrameIdx);
-            LogDbg(buf);
+            LogMsg("PIP: ",buf);
         }
     }
 
-    LogDbg("--- Decode thread finished ---");
+    LogMsg("PIP: ","--- Decode thread finished ---");
 }
 
 static void SafeCleanup(VideoEncoder& enc, VSRProcessor& vsr, VideoDecoder& dec) {
-    __try { enc.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in encoder.Close()"); }
+    __try { enc.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogMsg("PIP: ","SEH in encoder.Close()"); }
     // VSR shutdown is intentionally NOT called between pipeline runs.
     // NGX does not support clean re-initialisation in the same process —
     // calling rtx_video_api_cuda_shutdown() followed by a second
@@ -230,15 +208,15 @@ static void SafeCleanup(VideoEncoder& enc, VSRProcessor& vsr, VideoDecoder& dec)
     // ProcessFrame (access violation in NGX driver internals).
     // Real NGX shutdown is deferred to VSRProcessor::GlobalShutdown()
     // which runs at process exit.
-    __try { dec.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in decoder.Close()"); }
+    __try { dec.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogMsg("PIP: ","SEH in decoder.Close()"); }
 }
 
 void PipelineController::ThreadFuncImpl() {
     std::chrono::time_point<std::chrono::high_resolution_clock> lastReport;
-    LogDbg("--- Pipeline GPU thread started ---");
+    LogMsg("PIP: ","--- Pipeline GPU thread started ---");
 
     if (m_state.load() != PipelineState::Starting) {
-        LogDbg("State not Starting, aborting");
+        LogMsg("PIP: ","State not Starting, aborting");
         return;
     }
 
@@ -247,7 +225,7 @@ void PipelineController::ThreadFuncImpl() {
     {
         cudaError_t initErr = cudaSetDevice(m_cfg.gpuIndex);
         if (initErr != cudaSuccess) {
-            LogDbg("cudaSetDevice failed");
+            LogMsg("PIP: ","cudaSetDevice failed");
             if (onError) onError(L"CUDA 初始化失败");
             m_state.store(PipelineState::Error);
             return;
@@ -261,7 +239,7 @@ void PipelineController::ThreadFuncImpl() {
     LogStatus(onStatus, "打开解码器...");
     VideoInfo info;
     if (!m_decoder.Open(m_cfg.inputPath.c_str(), &info, true)) {
-        LogDbg("Failed to open input file");
+        LogMsg("PIP: ","Failed to open input file");
         if (onError) onError(L"无法打开输入文件");
         m_state.store(PipelineState::Error);
         return;
@@ -271,7 +249,7 @@ void PipelineController::ThreadFuncImpl() {
         LogStatus(onStatus, "GPU 硬件解码已启用 (NVDEC)");
         strncpy(m_decodeMode, "GPU", sizeof(m_decodeMode) - 1);
     } else {
-        LogDbg("GPU decoding not available — this build requires NVDEC support");
+        LogMsg("PIP: ","GPU decoding not available — this build requires NVDEC support");
         if (onError) onError(L"GPU 硬件解码不可用，当前必须使用 NVDEC 路径 (需要 NVIDIA GPU + 驱动 550+)");
         m_state.store(PipelineState::Error);
         goto cleanup;
@@ -292,7 +270,7 @@ void PipelineController::ThreadFuncImpl() {
             info.width, info.height, info.fps, info.totalFrames,
             info.srcTimeBaseNum, info.srcTimeBaseDen,
             info.videoCodecName, info.hasAudio ? info.audioCodecName : "none");
-        LogDbg(buf);
+        LogMsg("PIP: ",buf);
     }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
@@ -302,7 +280,7 @@ void PipelineController::ThreadFuncImpl() {
         char buf[256];
         snprintf(buf, sizeof(buf), "Output: %dx%d fps=%.3f quality=%d encoder=%d crf=%d speed=%d",
             m_dstW, m_dstH, outFps, m_cfg.qualityLevel, m_cfg.encoderIndex, m_cfg.crf, m_cfg.encoderSpeed);
-        LogDbg(buf);
+        LogMsg("PIP: ",buf);
     }
 
     // ---- Allocate frame slots (pinned CPU memory + GPU + per-slot streams) ----
@@ -313,7 +291,7 @@ void PipelineController::ThreadFuncImpl() {
     size_t rgbaDstSize  = (size_t)m_dstW * m_dstH * 4;
 
     { char buf[256]; snprintf(buf, sizeof(buf), "src=%dx%d dst=%dx%d nv12=%zu rgba=%zu",
-        m_srcW, m_srcH, m_dstW, m_dstH, nv12Size, rgbaSrcSize); LogDbg(buf); }
+        m_srcW, m_srcH, m_dstW, m_dstH, nv12Size, rgbaSrcSize); LogMsg("PIP: ",buf); }
 
     for (int i = 0; i < NUM_SLOTS; i++) {
         m_slots[i].w = m_srcW;
@@ -324,7 +302,7 @@ void PipelineController::ThreadFuncImpl() {
         // Pinned (page-locked) CPU memory for high-speed DMA transfers
         if (cudaMallocHost(&m_slots[i].nv12_cpu, nv12Size) != cudaSuccess ||
             cudaMallocHost(&m_slots[i].nv12_out_cpu, nv12OutSize) != cudaSuccess) {
-            LogDbg("Failed to allocate pinned CPU memory");
+            LogMsg("PIP: ","Failed to allocate pinned CPU memory");
             if (onError) onError(L"内存分配失败");
             m_state.store(PipelineState::Error);
             goto cleanup;
@@ -334,7 +312,7 @@ void PipelineController::ThreadFuncImpl() {
             cudaMalloc(&m_slots[i].d_rgba_src, rgbaSrcSize) != cudaSuccess ||
             cudaMalloc(&m_slots[i].d_rgba_dst, rgbaDstSize) != cudaSuccess ||
             cudaMalloc(&m_slots[i].d_nv12_out, nv12OutSize) != cudaSuccess) {
-            LogDbg("Failed to allocate GPU memory");
+            LogMsg("PIP: ","Failed to allocate GPU memory");
             if (onError) onError(L"GPU 内存分配失败，请检查显存");
             m_state.store(PipelineState::Error);
             goto cleanup;
@@ -342,14 +320,14 @@ void PipelineController::ThreadFuncImpl() {
 
         // Non-blocking per-slot streams for GPU kernel overlap
         if (cudaStreamCreateWithFlags(&m_slots[i].stream, cudaStreamNonBlocking) != cudaSuccess) {
-            LogDbg("Failed to create CUDA stream");
+            LogMsg("PIP: ","Failed to create CUDA stream");
             m_state.store(PipelineState::Error);
             goto cleanup;
         }
 
         // Inter-stream event for NVDEC default-stream → per-slot stream sync
         if (cudaEventCreate(&m_slots[i].decodeEvent) != cudaSuccess) {
-            LogDbg("Failed to create CUDA event");
+            LogMsg("PIP: ","Failed to create CUDA event");
             m_state.store(PipelineState::Error);
             goto cleanup;
         }
@@ -365,7 +343,7 @@ void PipelineController::ThreadFuncImpl() {
     // ---- Open VSR (SEH-safe) ----
     LogStatus(onStatus, "初始化 VSR (NGX)...");
     if (!SafeVSRInit(&m_vsr, m_cfg.gpuIndex)) {
-        LogDbg("VSR init failed");
+        LogMsg("PIP: ","VSR init failed");
         if (onError) onError(L"VSR 初始化失败，请检查 GPU 和驱动（需要 550+）");
         m_state.store(PipelineState::Error);
         goto cleanup;
@@ -397,12 +375,12 @@ void PipelineController::ThreadFuncImpl() {
 
         std::string lastEncErr;
         auto encStatus = [&](const char* msg) {
-            LogDbg(msg);
+            LogMsg("PIP: ",msg);
             if (msg) lastEncErr = msg;
             if (onStatus) onStatus(msg);
         };
         if (!m_encoder.Open(encCfg, encStatus)) {
-            LogDbg("Failed to open encoder");
+            LogMsg("PIP: ","Failed to open encoder");
             if (onError) {
                 wchar_t wbuf[512];
                 if (!lastEncErr.empty())
@@ -420,9 +398,9 @@ void PipelineController::ThreadFuncImpl() {
     // ---- Launch decode thread ----
     m_decodeDone.store(false);
     m_framesEncoded.store(0);
-    LogDbg("Step: Launching decode thread...");
+    LogMsg("PIP: ","Step: Launching decode thread...");
     m_decodeThread = std::thread(&PipelineController::DecodeFunc, this);
-    LogDbg("Decode thread launched");
+    LogMsg("PIP: ","Decode thread launched");
 
     // ---- GPU thread main loop (VSR + encode) ----
     m_state.store(PipelineState::Running);
@@ -437,13 +415,10 @@ void PipelineController::ThreadFuncImpl() {
     while (true) {
         if (m_state.load() == PipelineState::Paused) {
             std::unique_lock<std::mutex> lk(m_pauseMutex);
-            m_pauseCv.wait(lk, [] { return true; });
-        }
-        while (m_state.load() == PipelineState::Paused) {
-            Sleep(10);
+            m_pauseCv.wait(lk, [this] { return m_state.load() != PipelineState::Paused; });
         }
         if (m_state.load() != PipelineState::Running) {
-            LogDbg("GPU: state not Running, exiting loop");
+            LogMsg("PIP: ","GPU: state not Running, exiting loop");
             break;
         }
 
@@ -489,7 +464,7 @@ void PipelineController::ThreadFuncImpl() {
                     if (s != SlotState::Empty) allDone = false;
                 }
                 if (allDone) {
-                    LogDbg("GPU: all slots done, exiting loop");
+                    LogMsg("PIP: ","GPU: all slots done, exiting loop");
                     break;
                 }
             }
@@ -507,7 +482,7 @@ void PipelineController::ThreadFuncImpl() {
         vsrCtx.dstH = m_dstH;
 
         if (!SafeVSRProcess(&vsrCtx)) {
-            LogDbg("VSR evaluate failed or crashed");
+            LogMsg("PIP: ","VSR evaluate failed or crashed");
             if (onError) onError(L"VSR 处理失败");
             m_state.store(PipelineState::Error);
             break;
@@ -541,12 +516,12 @@ void PipelineController::ThreadFuncImpl() {
                     m_dstW, m_dstH, slot.stream);
                 cudaStreamSynchronize(slot.stream);
                 if (CudaFailed("GPU: RGBA->NV12 (CUDA enc)")) {
-                    LogDbg("GPU: CUDA error in RGBA->NV12 (CUDA enc)");
+                    LogMsg("PIP: ","GPU: CUDA error in RGBA->NV12 (CUDA enc)");
                     m_state.store(PipelineState::Error);
                     break;
                 }
                 if (!m_encoder.SubmitFrame(encPts)) {
-                    LogDbg("Encode failed (CUDA)");
+                    LogMsg("PIP: ","Encode failed (CUDA)");
                     if (onError) onError(L"编码失败 (CUDA)");
                     m_state.store(PipelineState::Error);
                     break;
@@ -562,12 +537,12 @@ void PipelineController::ThreadFuncImpl() {
                                 cudaMemcpyDeviceToHost, slot.stream);
                 cudaStreamSynchronize(slot.stream);
                 if (CudaFailed("GPU: RGBA->NV12 + D2H")) {
-                    LogDbg("GPU: CUDA error in RGBA->NV12 or D2H");
+                    LogMsg("PIP: ","GPU: CUDA error in RGBA->NV12 or D2H");
                     m_state.store(PipelineState::Error);
                     break;
                 }
                 if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, encPts)) {
-                    LogDbg("Encode failed");
+                    LogMsg("PIP: ","Encode failed");
                     if (onError) onError(L"编码失败");
                     m_state.store(PipelineState::Error);
                     break;
@@ -581,7 +556,7 @@ void PipelineController::ThreadFuncImpl() {
                     (long long)encPts, slotIdx,
                     (long long)slot.pts, slot.seq.load(),
                     (int)slot.state.load());
-                LogDbg(buf);
+                LogMsg("PIP: ",buf);
             }
         }
 
@@ -609,21 +584,21 @@ void PipelineController::ThreadFuncImpl() {
         if (encoded % 100 == 0) {
             char buf[128];
             snprintf(buf, sizeof(buf), "Encoded %d frames so far", encoded);
-            LogDbg(buf);
+            LogMsg("PIP: ",buf);
         }
     }
 
     { char buf[128]; snprintf(buf, sizeof(buf), "GPU loop ended, total frames encoded: %d",
-        m_framesEncoded.load()); LogDbg(buf); }
+        m_framesEncoded.load()); LogMsg("PIP: ",buf); }
 
     // ---- Wait for decode thread ----
-    LogDbg("Waiting for decode thread to join...");
+    LogMsg("PIP: ","Waiting for decode thread to join...");
     if (m_decodeThread.joinable()) {
         m_decodeDone.store(true);
         m_slotCv.notify_all();
         m_decodeThread.join();
     }
-    LogDbg("Decode thread joined");
+    LogMsg("PIP: ","Decode thread joined");
 
 cleanup:
     LogStatus(onStatus, "清理资源...");
@@ -656,7 +631,7 @@ cleanup:
     } else if (m_state.load() == PipelineState::Paused) {
         m_state.store(PipelineState::Idle);
     }
-    LogDbg("Pipeline GPU thread finished");
+    LogMsg("PIP: ","Pipeline GPU thread finished");
 }
 
 bool PipelineController::Start(const PipelineConfig& cfg) {
@@ -669,7 +644,7 @@ bool PipelineController::Start(const PipelineConfig& cfg) {
         m_thread.join();
     }
     m_thread = std::thread(&PipelineController::ThreadFunc, this);
-    LogDbg("Pipeline thread started");
+    LogMsg("PIP: ","Pipeline thread started");
     LogStatus(onStatus, "管道线程已启动");
     return true;
 }

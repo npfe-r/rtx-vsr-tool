@@ -53,13 +53,13 @@ bool MainWindow::InitD3D11()
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator   = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.Flags      = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.Flags      = 0;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow = m_hWnd;
     sd.SampleDesc.Count   = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed  = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     UINT createFlags = 0;
 #ifdef _DEBUG
@@ -148,14 +148,12 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
 
     VSRConfig& cfg = m_config.Get();
 
-    int winX = cfg.windowX;
-    int winY = cfg.windowY;
     int winW = cfg.windowW;
     int winH = cfg.windowH;
 
     // Always center on screen
-    winX = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
-    winY = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
+    int winX = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
+    int winY = (GetSystemMetrics(SM_CYSCREEN) - winH) / 2;
 
     m_hWnd = CreateWindowExW(WS_EX_APPWINDOW, CLASS_NAME, L"RTX 视频超分辨率工具",
                              WS_POPUP,
@@ -282,16 +280,24 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 ? (p->currentFrame * 100.0f / p->totalFrames) : 0.0f;
 
             {
-                std::lock_guard<std::mutex> lk(m_progressMutex);
-                m_displayFps    = p->fps;
-                m_displayEta    = p->etaSeconds;
+                // EMA smoothing on per-frame ms to reduce FPS/ETA jitter
+                float rawMs = p->fps > 0.001f ? 1000.0f / p->fps : 16.0f;
+                if (m_smoothedMs < 0.001f) {
+                    m_smoothedMs = rawMs;
+                } else {
+                    const float alpha = 0.12f; // lower = smoother; 0.12 ~ 8-frame half-life
+                    m_smoothedMs = alpha * rawMs + (1.0f - alpha) * m_smoothedMs;
+                }
+                int remaining = p->totalFrames - p->currentFrame;
+                m_displayFps = 1000.0f / m_smoothedMs;
+                m_displayEta = remaining * m_smoothedMs / 1000.0f;
                 m_currentFrame  = p->currentFrame;
                 m_totalFrames   = p->totalFrames;
             }
 
             snprintf(m_statusText, sizeof(m_statusText),
                      "帧 %d/%d  |  FPS: %.1f  |  剩余: %.0fs",
-                     p->currentFrame, p->totalFrames, p->fps, p->etaSeconds);
+                     p->currentFrame, p->totalFrames, m_displayFps, m_displayEta);
             strncpy(m_decodeMode, p->decodeMode, sizeof(m_decodeMode) - 1);
             delete p;
         }
@@ -599,7 +605,7 @@ void MainWindow::RenderUI()
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%.2f fps", outFps);
 
         static const char* encNames[] = {"H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
-                                         "libx264", "libx265", "libaom-av1"};
+                                         "libx264", "libx265", "libaom-av1", "SVT-AV1"};
         ImGui::Text("编码");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
@@ -685,9 +691,13 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
-    static const char* qualityNames[] = { "双三次", "低质量", "中等", "高质量", "极致" };
-    if (ImGui::Combo("##quality", &m_qualityLevel, qualityNames, 5))
+    static const char* qualityNames[] = { "低质量", "中等", "高质量", "极致" };
+    int qualityIdx = m_qualityLevel - 1;
+    if (qualityIdx < 0) qualityIdx = 0;
+    if (ImGui::Combo("##quality", &qualityIdx, qualityNames, 4)) {
+        m_qualityLevel = qualityIdx + 1;
         m_config.Get().qualityLevel = m_qualityLevel;
+    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::Separator();
@@ -1097,6 +1107,7 @@ void MainWindow::OnStartStop()
             m_showCompletePopup  = false;
             m_hasError           = false;
             m_startTime          = std::chrono::steady_clock::now();
+            m_smoothedMs         = 0.0f;
             snprintf(m_statusText, sizeof(m_statusText), "处理中...");
         } else {
             MessageBoxW(m_hWnd, L"管道已在运行中", L"错误", MB_ICONERROR);
@@ -1195,6 +1206,7 @@ void MainWindow::LoadConfigToUI()
     narrow(cfg.lastInputPath,  m_inputPath,  sizeof(m_inputPath));
     narrow(cfg.lastOutputPath, m_outputPath, sizeof(m_outputPath));
     m_qualityLevel = cfg.qualityLevel;
+    if (m_qualityLevel < 1) m_qualityLevel = 1;
     m_outputMode   = cfg.outputMode;
     m_outputWidth  = cfg.fixedWidth;
     m_outputHeight = cfg.fixedHeight;
@@ -1211,13 +1223,6 @@ void MainWindow::LoadConfigToUI()
 void MainWindow::SaveUIToConfig()
 {
     VSRConfig& cfg = m_config.Get();
-
-    RECT rc;
-    GetWindowRect(m_hWnd, &rc);
-    if (rc.left != CW_USEDEFAULT) {
-        cfg.windowX = rc.left;
-        cfg.windowY = rc.top;
-    }
 
     widen(m_inputPath,  cfg.lastInputPath,  MAX_PATH);
     widen(m_outputPath, cfg.lastOutputPath, MAX_PATH);

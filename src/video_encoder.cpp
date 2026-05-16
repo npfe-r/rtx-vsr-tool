@@ -14,27 +14,7 @@ extern "C" {
 #include <thread>
 #include <windows.h>
 
-static void EncLog(const char* msg) {
-    OutputDebugStringA(msg);
-    OutputDebugStringA("\n");
-
-    char logPath[MAX_PATH];
-    GetModuleFileNameA(NULL, logPath, sizeof(logPath));
-    char* slash = strrchr(logPath, '\\');
-    if (slash) *(slash + 1) = '\0';
-    strcat_s(logPath, "pipeline_debug.log");
-    FILE* f = nullptr;
-    fopen_s(&f, logPath, "a");
-    if (f) { fprintf(f, "ENC: %s\n", msg); fflush(f); fclose(f); }
-
-    HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hCon && hCon != INVALID_HANDLE_VALUE) {
-        DWORD wrote;
-        WriteConsoleA(hCon, "ENC: ", 5, &wrote, nullptr);
-        WriteConsoleA(hCon, msg, (DWORD)strlen(msg), &wrote, nullptr);
-        WriteConsoleA(hCon, "\n", 1, &wrote, nullptr);
-    }
-}
+#include "debug_util.h"
 
 struct VideoEncoder::Impl {
     AVFormatContext* fmtCtx = nullptr;
@@ -59,6 +39,9 @@ struct VideoEncoder::Impl {
     bool            audioTranscoding = false;
 
     SwsContext*     swsCtx = nullptr;
+
+    // Status callback (stored from Open() for use in Close() audio processing)
+    OnEncoderStatus statusCb = nullptr;
 
     // CUDA hwcontext for NVENC zero-copy GPU encoding
     AVBufferRef*     hwDeviceCtx = nullptr;
@@ -128,9 +111,10 @@ bool VideoEncoder::IsOpen() const { return m->fmtCtx != nullptr; }
 
 bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     Close();
+    m->statusCb = statusCb;
 
     { char _b[256]; snprintf(_b, sizeof(_b), "Open encoder: codecId=%d width=%d height=%d fps=%.1f crf=%d speed=%d container=%d",
-        cfg.codecId, cfg.width, cfg.height, cfg.fps, cfg.crf, cfg.speed, cfg.container); EncLog(_b); }
+        cfg.codecId, cfg.width, cfg.height, cfg.fps, cfg.crf, cfg.speed, cfg.container); LogMsg("ENC: ",_b); }
 
     const char* encName = GetEncoderName(cfg.codecId);
     const char* displayName = GetDisplayName(encName);
@@ -168,7 +152,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
     const char* ext = GetContainerExt(cfg.container);
     avformat_alloc_output_context2(&m->fmtCtx, NULL, ext, NULL);
-    if (!m->fmtCtx) { EncLog("avformat_alloc_output_context2 failed"); return false; }
+    if (!m->fmtCtx) { LogMsg("ENC: ","avformat_alloc_output_context2 failed"); return false; }
     m->videoStream = avformat_new_stream(m->fmtCtx, NULL);
 
     m->encCtx = avcodec_alloc_context3(codec);
@@ -232,12 +216,12 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
                     if (statusCb)
                         statusCb("编码器: CUDA 零拷贝编码已启用");
                 } else {
-                    EncLog("av_hwframe_ctx_init failed for CUDA hwframe pool");
+                    LogMsg("ENC: ","av_hwframe_ctx_init failed for CUDA hwframe pool");
                     av_buffer_unref(&m->hwDeviceCtx);
                     m->hwDeviceCtx = nullptr;
                 }
             } else {
-                EncLog("av_hwdevice_ctx_create failed for CUDA");
+                LogMsg("ENC: ","av_hwdevice_ctx_create failed for CUDA");
             }
         }
     } else {
@@ -308,7 +292,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             }
             av_opt_set_int(m->encCtx->priv_data, "preset", svtPreset, 0);
         } else {
-            EncLog("Unknown software encoder, setting only CRF");
+            LogMsg("ENC: ","Unknown software encoder, setting only CRF");
         }
     }
 
@@ -316,7 +300,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     if (ret < 0) {
         char err[256];
         av_strerror(ret, err, sizeof(err));
-        { char _b[384]; snprintf(_b, sizeof(_b), "avcodec_open2 failed: ret=%d (%s)", ret, err); EncLog(_b); }
+        { char _b[384]; snprintf(_b, sizeof(_b), "avcodec_open2 failed: ret=%d (%s)", ret, err); LogMsg("ENC: ",_b); }
         if (statusCb) {
             char msg[256];
             snprintf(msg, sizeof(msg), "编码器 %s 打开失败: %s", displayName, err);
@@ -405,12 +389,12 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     if (!(m->fmtCtx->oformat->flags & AVFMT_NOFILE)) {
         char pathA[MAX_PATH];
         WideCharToMultiByte(CP_UTF8, 0, cfg.outputPath, -1, pathA, MAX_PATH, NULL, NULL);
-        { char _b[512]; snprintf(_b, sizeof(_b), "avio_open(%s)...", pathA); EncLog(_b); }
+        { char _b[512]; snprintf(_b, sizeof(_b), "avio_open(%s)...", pathA); LogMsg("ENC: ",_b); }
         if (avio_open(&m->fmtCtx->pb, pathA, AVIO_FLAG_WRITE) < 0) {
-            EncLog("avio_open failed");
+            LogMsg("ENC: ","avio_open failed");
             return false;
         }
-        EncLog("avio_open OK");
+        LogMsg("ENC: ","avio_open OK");
     }
 
     avformat_write_header(m->fmtCtx, NULL);
@@ -422,7 +406,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         m->frame->height = cfg.height;
         m->frame->format = m->pixFmt;
         if (av_frame_get_buffer(m->frame, 0) < 0) {
-            EncLog("av_frame_get_buffer failed");
+            LogMsg("ENC: ","av_frame_get_buffer failed");
             return false;
         }
     }
@@ -463,7 +447,7 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
             return false;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        EncLog("SEH in avcodec_send_frame");
+        LogMsg("ENC: ","SEH in avcodec_send_frame");
         m->encCtxFailed = true;
         return false;
     }
@@ -474,7 +458,7 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
             int ret = avcodec_receive_packet(m->encCtx, &pkt);
             if (ret < 0) break;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in avcodec_receive_packet");
+            LogMsg("ENC: ","SEH in avcodec_receive_packet");
             m->encCtxFailed = true;
             av_packet_unref(&pkt);
             return false;
@@ -484,7 +468,7 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
             pkt.stream_index = m->videoStream->index;
             av_interleaved_write_frame(m->fmtCtx, &pkt);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in av_interleaved_write_frame");
+            LogMsg("ENC: ","SEH in av_interleaved_write_frame");
             m->encCtxFailed = true;
             av_packet_unref(&pkt);
             return false;
@@ -502,7 +486,7 @@ bool VideoEncoder::GetFrameBuffer(uint8_t** y, int* yPitch, uint8_t** uv, int* u
 
     // av_hwframe_get_buffer internally sets frame->hw_frames_ctx
     if (av_hwframe_get_buffer(m->hwFramesCtx, m->cudaFrame, 0) < 0) {
-        EncLog("GetFrameBuffer: av_hwframe_get_buffer failed");
+        LogMsg("ENC: ","GetFrameBuffer: av_hwframe_get_buffer failed");
         return false;
     }
 
@@ -523,13 +507,13 @@ bool VideoEncoder::SubmitFrame(int64_t pts) {
         int ret = avcodec_send_frame(m->encCtx, m->cudaFrame);
         if (ret < 0) {
             char _e[256]; av_strerror(ret, _e, sizeof(_e));
-            char _b[256]; snprintf(_b, sizeof(_b), "SubmitFrame: avcodec_send_frame failed: %s", _e); EncLog(_b);
+            char _b[256]; snprintf(_b, sizeof(_b), "SubmitFrame: avcodec_send_frame failed: %s", _e); LogMsg("ENC: ",_b);
             m->encCtxFailed = true;
             av_frame_unref(m->cudaFrame);
             return false;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        EncLog("SEH in avcodec_send_frame (CUDA)");
+        LogMsg("ENC: ","SEH in avcodec_send_frame (CUDA)");
         m->encCtxFailed = true;
         av_frame_unref(m->cudaFrame);
         return false;
@@ -542,7 +526,7 @@ bool VideoEncoder::SubmitFrame(int64_t pts) {
             ret = avcodec_receive_packet(m->encCtx, &pkt);
             if (ret < 0) break;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in avcodec_receive_packet (CUDA)");
+            LogMsg("ENC: ","SEH in avcodec_receive_packet (CUDA)");
             m->encCtxFailed = true;
             av_packet_unref(&pkt);
             return false;
@@ -552,7 +536,7 @@ bool VideoEncoder::SubmitFrame(int64_t pts) {
             pkt.stream_index = m->videoStream->index;
             av_interleaved_write_frame(m->fmtCtx, &pkt);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in av_interleaved_write_frame (CUDA)");
+            LogMsg("ENC: ","SEH in av_interleaved_write_frame (CUDA)");
             m->encCtxFailed = true;
             av_packet_unref(&pkt);
             return false;
@@ -569,7 +553,7 @@ void VideoEncoder::Close() {
         __try {
             avcodec_send_frame(m->encCtx, NULL);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in Close flush send_frame");
+            LogMsg("ENC: ","SEH in Close flush send_frame");
         }
         __try {
             AVPacket pkt = { 0 };
@@ -580,16 +564,28 @@ void VideoEncoder::Close() {
                 av_packet_unref(&pkt);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            EncLog("SEH in Close flush receive_packet");
+            LogMsg("ENC: ","SEH in Close flush receive_packet");
         }
     }
 
     // Audio (transcode or remux) - only if fmtCtx was fully opened
     if (m->fmtCtx && m->fmtCtx->pb && m->audioStream && m->audioPackets) {
         if (m->audioTranscoding) {
+            if (m->statusCb) m->statusCb("音频转码中...");
+            int totalPkts = (int)m->audioPackets->size();
+            int pktCount = 0;
             AVPacket* pkt = av_packet_alloc();
+            int nextReportPct = 25;
             for (AVPacket* apkt : *m->audioPackets) {
                 if (!apkt) continue;
+                pktCount++;
+                int pct = pktCount * 100 / totalPkts;
+                if (pct >= nextReportPct && m->statusCb) {
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "音频转码中... %d%%", pct);
+                    m->statusCb(msg);
+                    nextReportPct = pct + 25;
+                }
                 avcodec_send_packet(m->audioDecCtx, apkt);
                 while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
                     int dstSamples = av_rescale_rnd(
@@ -645,6 +641,7 @@ void VideoEncoder::Close() {
             }
             av_packet_free(&pkt);
         } else {
+            if (m->statusCb) m->statusCb("音频复制中...");
             for (AVPacket* apkt : *m->audioPackets) {
                 if (apkt) {
                     apkt->stream_index = m->audioStream->index;
@@ -682,5 +679,6 @@ void VideoEncoder::Close() {
     m->videoStream = nullptr;
     m->audioStream = nullptr;
     m->audioPackets = nullptr;
+    m->statusCb = nullptr;
     m->audioTranscoding = false;
 }

@@ -14,7 +14,7 @@ struct EncodeConfig {
     // 3=libx264, 4=libx265, 5=libaom-av1
     int codecId = 0;
     int crf = 18;
-    int speed = 2;       // 0=fast...4=slow
+    int speed = 3;       // 0=fast...4=slow
     int container = 0;   // 0=mp4, 1=mov
 
     // Audio remux (optional)

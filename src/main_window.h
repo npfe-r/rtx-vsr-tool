@@ -97,4 +97,5 @@ private:
     float      m_displayEta      = 0.0f;
     int        m_currentFrame    = 0;
     int        m_totalFrames     = 0;
+    float      m_smoothedMs      = 0.0f; // EMA-smoothed ms-per-frame for stable FPS/ETA
 };

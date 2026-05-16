@@ -4,8 +4,6 @@
 
 struct VSRConfig {
     // Window state
-    int windowX = CW_USEDEFAULT;
-    int windowY = CW_USEDEFAULT;
     int windowW = 540;
     int windowH = 506;
 

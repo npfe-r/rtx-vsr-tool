@@ -7,26 +7,7 @@
 #include <cstdio>
 #include <windows.h>
 
-static void DbgMsg(const char* msg) {
-    OutputDebugStringA(msg);
-    OutputDebugStringA("\n");
-
-    char logPath[MAX_PATH];
-    GetModuleFileNameA(NULL, logPath, sizeof(logPath));
-    char* slash = strrchr(logPath, '\\');
-    if (slash) *(slash + 1) = '\0';
-    strcat_s(logPath, "pipeline_debug.log");
-    FILE* f = nullptr;
-    fopen_s(&f, logPath, "a");
-    if (f) { fprintf(f, "VSR: %s\n", msg); fflush(f); fclose(f); }
-
-    HANDLE hCon = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hCon && hCon != INVALID_HANDLE_VALUE) {
-        DWORD wrote;
-        WriteConsoleA(hCon, msg, (DWORD)strlen(msg), &wrote, nullptr);
-        WriteConsoleA(hCon, "\n", 1, &wrote, nullptr);
-    }
-}
+#include "debug_util.h"
 
 struct VSRProcessor::Impl {
     CUdevice   cuDevice  = 0;
@@ -53,27 +34,27 @@ bool VSRProcessor::Initialize(int gpuIndex) {
 
     // Init CUDA driver API (idempotent after the first call)
     snprintf(buf, sizeof(buf), "VSR: cuInit(0)...");
-    DbgMsg(buf);
+    LogMsg("VSR: ",buf);
     CUresult res = cuInit(0);
-    if (res != CUDA_SUCCESS) { DbgMsg("VSR: cuInit failed"); return false; }
-    DbgMsg("VSR: cuInit OK");
+    if (res != CUDA_SUCCESS) { LogMsg("VSR: ","VSR: cuInit failed"); return false; }
+    LogMsg("VSR: ","VSR: cuInit OK");
 
     snprintf(buf, sizeof(buf), "VSR: cuDeviceGet(%d)...", gpuIndex);
-    DbgMsg(buf);
+    LogMsg("VSR: ",buf);
     res = cuDeviceGet(&m->cuDevice, gpuIndex);
-    if (res != CUDA_SUCCESS) { DbgMsg("VSR: cuDeviceGet failed"); return false; }
-    DbgMsg("VSR: cuDeviceGet OK");
+    if (res != CUDA_SUCCESS) { LogMsg("VSR: ","VSR: cuDeviceGet failed"); return false; }
+    LogMsg("VSR: ","VSR: cuDeviceGet OK");
 
     res = cuDevicePrimaryCtxRetain(&m->cuContext, m->cuDevice);
-    if (res != CUDA_SUCCESS) { DbgMsg("VSR: cuDevicePrimaryCtxRetain failed"); return false; }
-    DbgMsg("VSR: cuDevicePrimaryCtxRetain OK");
+    if (res != CUDA_SUCCESS) { LogMsg("VSR: ","VSR: cuDevicePrimaryCtxRetain failed"); return false; }
+    LogMsg("VSR: ","VSR: cuDevicePrimaryCtxRetain OK");
 
     if (!s_ngxInitialized) {
         // First and only NGX initialisation — once per process lifetime.
         CUcontext current;
         cuCtxPushCurrent(m->cuContext);
 
-        DbgMsg("VSR: calling rtx_video_api_cuda_create...");
+        LogMsg("VSR: ","VSR: calling rtx_video_api_cuda_create...");
         API_BOOL ok = rtx_video_api_cuda_create(
             m->cuContext,           // CUDA context
             nullptr,                // CUDA stream (null = default)
@@ -85,7 +66,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
         cuCtxPopCurrent(&current);
 
         if (ok != API_BOOL_SUCCESS) {
-            DbgMsg("VSR: rtx_video_api_cuda_create failed");
+            LogMsg("VSR: ","VSR: rtx_video_api_cuda_create failed");
             cuDevicePrimaryCtxRelease(m->cuDevice);
             m->cuContext = nullptr;
             return false;
@@ -93,12 +74,12 @@ bool VSRProcessor::Initialize(int gpuIndex) {
 
         s_ngxInitialized = true;
         s_ngxGpuIndex    = gpuIndex;
-        DbgMsg("VSR: NGX initialised (first time)");
+        LogMsg("VSR: ","VSR: NGX initialised (first time)");
     } else if (s_ngxGpuIndex != gpuIndex) {
         // GPU selection changed — the existing NGX/VSR state is tied to the
         // previous GPU.  Do a full re-init (same risk as above, but GPU
         // switching between runs is rare and the user explicitly chose it).
-        DbgMsg("VSR: GPU changed, performing full re-init");
+        LogMsg("VSR: ","VSR: GPU changed, performing full re-init");
         GlobalShutdown();
 
         CUcontext current;
@@ -109,7 +90,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
         cuCtxPopCurrent(&current);
 
         if (ok != API_BOOL_SUCCESS) {
-            DbgMsg("VSR: rtx_video_api_cuda_create (re-init) failed");
+            LogMsg("VSR: ","VSR: rtx_video_api_cuda_create (re-init) failed");
             cuDevicePrimaryCtxRelease(m->cuDevice);
             m->cuContext = nullptr;
             return false;
@@ -117,7 +98,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
 
         s_ngxInitialized = true;
         s_ngxGpuIndex    = gpuIndex;
-        DbgMsg("VSR: NGX re-initialised on new GPU");
+        LogMsg("VSR: ","VSR: NGX re-initialised on new GPU");
     }
     // Same GPU, NGX already initialised: reuse the existing cuda_api_impl
     // singleton and VSR feature handle.  The evaluate function recreates
@@ -125,7 +106,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
     // re-creation of the VSR feature is needed here.
 
     m_initialized = true;
-    DbgMsg("VSR: initialized successfully");
+    LogMsg("VSR: ","VSR: initialized successfully");
     return true;
 }
 

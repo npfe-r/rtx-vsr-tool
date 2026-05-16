@@ -20,8 +20,6 @@ void Config::Load() {
         GetPrivateProfileStringW(section, key, def, buf, MAX_PATH, path.c_str());
     };
 
-    m_config.windowX   = r(L"Window", L"X", CW_USEDEFAULT);
-    m_config.windowY   = r(L"Window", L"Y", CW_USEDEFAULT);
     m_config.windowW   = r(L"Window", L"W", 540);
     m_config.windowH   = r(L"Window", L"H", 506);
     m_config.qualityLevel = r(L"Params", L"Quality", 3);
@@ -47,8 +45,6 @@ void Config::Save() {
         wchar_t buf[16]; swprintf(buf, 16, L"%d", val);
         WritePrivateProfileStringW(section, key, buf, path.c_str());
     };
-    w(L"Window", L"X", m_config.windowX);
-    w(L"Window", L"Y", m_config.windowY);
     w(L"Window", L"W", m_config.windowW);
     w(L"Window", L"H", m_config.windowH);
     w(L"Params", L"Quality",   m_config.qualityLevel);
