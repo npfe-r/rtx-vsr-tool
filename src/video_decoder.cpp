@@ -49,6 +49,7 @@ struct VideoDecoder::Impl {
     std::vector<AVFrame*> m_reorderBuffer;
     std::vector<int>      m_reorderAges;
     AVFrame* m_gpuOutputFrame = nullptr;
+    int64_t  m_lastPTS = -1;            // PTS of the last decoded frame (CPU path)
     static const int m_reorderDepth = 8;
 };
 
@@ -209,10 +210,28 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
 }
 
 bool VideoDecoder::ReadFrameNV12(uint8_t* outData, int* outStride) {
-    // CPU decode path is disabled in GPU-only pipeline mode
-    (void)outData;
-    (void)outStride;
-    return false;
+    if (!m->fmtCtx || !m->decCtx) return false;
+
+    if (!DecodeOne()) return false;
+
+    int w = m->targetW;
+    int h = m->targetH;
+
+    if (!m->swsCtx) {
+        m->swsCtx = sws_getContext(w, h, m->decCtx->pix_fmt,
+                                    w, h, AV_PIX_FMT_NV12,
+                                    SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!m->swsCtx) return false;
+    }
+
+    uint8_t* dst[2] = { outData, outData + w * h };
+    int dstStride[2] = { w, w };
+    sws_scale(m->swsCtx, m->decoded->data, m->decoded->linesize, 0, h, dst, dstStride);
+
+    if (outStride) *outStride = w;
+
+    m->m_lastPTS = m->decoded->pts;
+    return true;
 }
 
 bool VideoDecoder::ReadFrameGPU(const uint8_t** outY, int* yPitch,
@@ -340,5 +359,7 @@ void* VideoDecoder::GetAudioCodecPar() const {
 }
 
 int64_t VideoDecoder::GetLastPTS() const {
-    return m->m_gpuOutputFrame ? m->m_gpuOutputFrame->pts : -1;
+    if (m->m_gpuOutputFrame)
+        return m->m_gpuOutputFrame->pts;
+    return m->m_lastPTS;
 }

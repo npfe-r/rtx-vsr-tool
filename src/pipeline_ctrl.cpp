@@ -119,8 +119,8 @@ void PipelineController::DecodeFunc() {
     cudaSetDevice(m_cfg.gpuIndex);
     LogMsg("PIP: ","Decode: CUDA device set");
 
-    // GPU-only decode path: NVDEC outputs GPU device pointers directly.
-    // The decoder maintains an internal PTS reorder buffer (depth=8) and
+    // Decode path: NVDEC GPU (device pointers directly) or CPU software (NV12→H2D).
+    // GPU path uses an internal PTS reorder buffer (depth=8) and
     // returns frames in display order regardless of the decode-order arrival.
     int decFrameIdx = 0;
 
@@ -152,29 +152,53 @@ void PipelineController::DecodeFunc() {
         FrameSlot& slot = m_slots[slotIdx];
         slot.seq = decFrameIdx;
 
-        const uint8_t* yDev = nullptr;
-        const uint8_t* uvDev = nullptr;
-        int yPitch = 0, uvPitch = 0;
-        if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch, &slot.pts)) {
-            LogMsg("PIP: ","Decode GPU: EOF or error");
-            slot.state.store(SlotState::Empty);
-            m_decodeDone.store(true);
-            m_slotCv.notify_one();
-            break;
+        bool useGPU = m_decoder.IsHWDecoding();
+        if (useGPU) {
+            const uint8_t* yDev = nullptr;
+            const uint8_t* uvDev = nullptr;
+            int yPitch = 0, uvPitch = 0;
+            if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch, &slot.pts)) {
+                LogMsg("PIP: ","Decode GPU: EOF or error");
+                slot.state.store(SlotState::Empty);
+                m_decodeDone.store(true);
+                m_slotCv.notify_one();
+                break;
+            }
+
+            // Synchronise NVDEC default-stream output with the per-slot non-blocking
+            // stream.  cudaStreamNonBlocking does NOT implicitly synchronise with
+            // stream 0, so we use an inter-stream event barrier to guarantee the
+            // NVDEC decoded surface is fully written before nv12_to_rgba reads it.
+            cudaEventRecord(slot.decodeEvent, 0);
+            cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
+
+            launch_nv12_to_rgba(
+                yDev, yPitch,
+                uvDev, uvPitch,
+                slot.d_rgba_src, m_srcW * 4,
+                m_srcW, m_srcH, slot.stream);
+        } else {
+            int stride = m_srcW;
+            if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, &stride)) {
+                LogMsg("PIP: ","Decode CPU: EOF or error");
+                slot.state.store(SlotState::Empty);
+                m_decodeDone.store(true);
+                m_slotCv.notify_one();
+                break;
+            }
+            slot.pts = m_decoder.GetLastPTS();
+
+            // H2D copy CPU NV12 → GPU d_nv12
+            size_t nv12Size = (size_t)m_srcW * m_srcH * 3 / 2;
+            cudaMemcpyAsync(slot.d_nv12, slot.nv12_cpu, nv12Size,
+                            cudaMemcpyHostToDevice, slot.stream);
+
+            launch_nv12_to_rgba(
+                slot.d_nv12, stride,
+                slot.d_nv12 + m_srcW * m_srcH, stride,
+                slot.d_rgba_src, m_srcW * 4,
+                m_srcW, m_srcH, slot.stream);
         }
-
-        // Synchronise NVDEC default-stream output with the per-slot non-blocking
-        // stream.  cudaStreamNonBlocking does NOT implicitly synchronise with
-        // stream 0, so we use an inter-stream event barrier to guarantee the
-        // NVDEC decoded surface is fully written before nv12_to_rgba reads it.
-        cudaEventRecord(slot.decodeEvent, 0);
-        cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
-
-        launch_nv12_to_rgba(
-            yDev, yPitch,
-            uvDev, uvPitch,
-            slot.d_rgba_src, m_srcW * 4,
-            m_srcW, m_srcH, slot.stream);
 
         cudaStreamSynchronize(slot.stream);
         if (CudaFailed("Decode: NV12->RGBA")) {
@@ -249,10 +273,8 @@ void PipelineController::ThreadFuncImpl() {
         LogStatus(onStatus, "GPU 硬件解码已启用 (NVDEC)");
         strncpy(m_decodeMode, "GPU", sizeof(m_decodeMode) - 1);
     } else {
-        LogMsg("PIP: ","GPU decoding not available — this build requires NVDEC support");
-        if (onError) onError(L"GPU 硬件解码不可用，当前必须使用 NVDEC 路径 (需要 NVIDIA GPU + 驱动 550+)");
-        m_state.store(PipelineState::Error);
-        goto cleanup;
+        LogStatus(onStatus, "NVDEC 不可用，使用软件解码 (CPU)");
+        strncpy(m_decodeMode, "CPU", sizeof(m_decodeMode) - 1);
     }
 
     m_srcW = info.width;
