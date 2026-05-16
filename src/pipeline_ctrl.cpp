@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <climits>
 #include <windows.h>
 #include <exception>
 
@@ -119,6 +120,7 @@ void PipelineController::ThreadFunc() {
             if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
             if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
             if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
+            if (m_slots[i].decodeEvent)  cudaEventDestroy(m_slots[i].decodeEvent);
             if (m_slots[i].stream)       cudaStreamDestroy(m_slots[i].stream);
         }
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
@@ -133,10 +135,9 @@ void PipelineController::DecodeFunc() {
     cudaSetDevice(m_cfg.gpuIndex);
     LogDbg("Decode: CUDA device set");
 
-    size_t nv12Size = (size_t)m_srcW * m_srcH * 3 / 2;
-    bool gpuPath = m_decoder.IsHWDecoding();
-    if (gpuPath)
-        LogDbg("Decode: using GPU-only path (NVDEC -> GPU -> NV12->RGBA)");
+    // GPU-only decode path: NVDEC outputs GPU device pointers directly.
+    // The decoder maintains an internal PTS reorder buffer (depth=8) and
+    // returns frames in display order regardless of the decode-order arrival.
     int decFrameIdx = 0;
 
     while (true) {
@@ -168,41 +169,32 @@ void PipelineController::DecodeFunc() {
         }
 
         FrameSlot& slot = m_slots[slotIdx];
+        slot.seq = decFrameIdx;
 
-        if (gpuPath) {
-            const uint8_t* yDev = nullptr;
-            const uint8_t* uvDev = nullptr;
-            int yPitch = 0, uvPitch = 0;
-            if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch)) {
-                LogDbg("Decode GPU: EOF or error");
-                slot.state.store(SlotState::Empty);
-                m_decodeDone.store(true);
-                m_slotCv.notify_one();
-                break;
-            }
-            launch_nv12_to_rgba(
-                yDev, yPitch,
-                uvDev, uvPitch,
-                slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream);
-        } else {
-            int strides[2];
-            if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, strides)) {
-                LogDbg("Decode: EOF or error");
-                slot.state.store(SlotState::Empty);
-                m_decodeDone.store(true);
-                m_slotCv.notify_one();
-                break;
-            }
-
-            cudaMemcpyAsync(slot.d_nv12, slot.nv12_cpu, nv12Size,
-                            cudaMemcpyHostToDevice, slot.stream);
-            launch_nv12_to_rgba(
-                slot.d_nv12, m_srcW,
-                slot.d_nv12 + m_srcW * m_srcH, m_srcW,
-                slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream);
+        const uint8_t* yDev = nullptr;
+        const uint8_t* uvDev = nullptr;
+        int yPitch = 0, uvPitch = 0;
+        if (!m_decoder.ReadFrameGPU(&yDev, &yPitch, &uvDev, &uvPitch, &slot.pts)) {
+            LogDbg("Decode GPU: EOF or error");
+            slot.state.store(SlotState::Empty);
+            m_decodeDone.store(true);
+            m_slotCv.notify_one();
+            break;
         }
+
+        // Synchronise NVDEC default-stream output with the per-slot non-blocking
+        // stream.  cudaStreamNonBlocking does NOT implicitly synchronise with
+        // stream 0, so we use an inter-stream event barrier to guarantee the
+        // NVDEC decoded surface is fully written before nv12_to_rgba reads it.
+        cudaEventRecord(slot.decodeEvent, 0);
+        cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
+
+        launch_nv12_to_rgba(
+            yDev, yPitch,
+            uvDev, uvPitch,
+            slot.d_rgba_src, m_srcW * 4,
+            m_srcW, m_srcH, slot.stream);
+
         cudaStreamSynchronize(slot.stream);
         if (CudaFailed("Decode: NV12->RGBA")) {
             LogDbg("Decode: CUDA error in NV12->RGBA");
@@ -270,8 +262,10 @@ void PipelineController::ThreadFuncImpl() {
         LogStatus(onStatus, "GPU 硬件解码已启用 (NVDEC)");
         strncpy(m_decodeMode, "GPU", sizeof(m_decodeMode) - 1);
     } else {
-        LogStatus(onStatus, "GPU 解码不可用，自动回退到 CPU 解码");
-        strncpy(m_decodeMode, "CPU", sizeof(m_decodeMode) - 1);
+        LogDbg("GPU decoding not available — this build requires NVDEC support");
+        if (onError) onError(L"GPU 硬件解码不可用，当前必须使用 NVDEC 路径 (需要 NVIDIA GPU + 驱动 550+)");
+        m_state.store(PipelineState::Error);
+        goto cleanup;
     }
 
     m_srcW = info.width;
@@ -279,9 +273,28 @@ void PipelineController::ThreadFuncImpl() {
     m_srcFps = info.fps;
     m_totalFrames = info.totalFrames;
     if (m_totalFrames <= 0) m_totalFrames = 1;
+    m_srcTimeBaseNum = info.srcTimeBaseNum;
+    m_srcTimeBaseDen = info.srcTimeBaseDen;
+
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "Source: %dx%d fps=%.3f frames=%d tb=%d/%d codec=%s audio=%s",
+            info.width, info.height, info.fps, info.totalFrames,
+            info.srcTimeBaseNum, info.srcTimeBaseDen,
+            info.videoCodecName, info.hasAudio ? info.audioCodecName : "none");
+        LogDbg(buf);
+    }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
     double outFps = m_cfg.outputFps > 0 ? (double)m_cfg.outputFps : m_srcFps;
+
+    {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "Output: %dx%d fps=%.3f quality=%d encoder=%d crf=%d speed=%d",
+            m_dstW, m_dstH, outFps, m_cfg.qualityLevel, m_cfg.encoderIndex, m_cfg.crf, m_cfg.encoderSpeed);
+        LogDbg(buf);
+    }
 
     // ---- Allocate frame slots (pinned CPU memory + GPU + per-slot streams) ----
     LogStatus(onStatus, "分配帧缓冲区...");
@@ -321,6 +334,13 @@ void PipelineController::ThreadFuncImpl() {
         // Non-blocking per-slot streams for GPU kernel overlap
         if (cudaStreamCreateWithFlags(&m_slots[i].stream, cudaStreamNonBlocking) != cudaSuccess) {
             LogDbg("Failed to create CUDA stream");
+            m_state.store(PipelineState::Error);
+            goto cleanup;
+        }
+
+        // Inter-stream event for NVDEC default-stream → per-slot stream sync
+        if (cudaEventCreate(&m_slots[i].decodeEvent) != cudaSuccess) {
+            LogDbg("Failed to create CUDA event");
             m_state.store(PipelineState::Error);
             goto cleanup;
         }
@@ -418,23 +438,37 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
-        // Search for VSR_Ready slot
-        int slotIdx = -1;
+        // Wait for any VSR_Ready slot.  Frames arrive from the decoder in
+        // display order (PTS-sorted by the decoder's internal reorder buffer),
+        // so any ready slot with the smallest seq number contains the next
+        // display-ordered frame.
         {
             std::unique_lock<std::mutex> lk(m_slotMutex);
-            m_slotCv.wait_for(lk, std::chrono::milliseconds(100), [&] {
-                for (int i = 0; i < NUM_SLOTS; i++) {
+            m_slotCv.wait_for(lk, std::chrono::milliseconds(200), [&] {
+                for (int i = 0; i < NUM_SLOTS; i++)
                     if (m_slots[i].state.load() == SlotState::VSR_Ready) return true;
-                }
                 return m_decodeDone.load();
             });
         }
 
+        // Pick the VSR_Ready slot with the smallest seq number.
+        // Seq is assigned monotonically by the decode thread in display order
+        // (guaranteed by the decoder's internal PTS reorder buffer).
+        int slotIdx = -1;
+        int bestSeq = INT_MAX;
         for (int i = 0; i < NUM_SLOTS; i++) {
-            SlotState expected = SlotState::VSR_Ready;
-            if (m_slots[i].state.compare_exchange_strong(expected, SlotState::Encoding)) {
+            SlotState s = m_slots[i].state.load(std::memory_order_acquire);
+            if (s != SlotState::VSR_Ready) continue;
+            int seq = m_slots[i].seq.load();
+            if (slotIdx < 0 || seq < bestSeq) {
+                bestSeq = seq;
                 slotIdx = i;
-                break;
+            }
+        }
+        if (slotIdx >= 0) {
+            SlotState expected = SlotState::VSR_Ready;
+            if (!m_slots[slotIdx].state.compare_exchange_strong(expected, SlotState::Encoding)) {
+                slotIdx = -1;
             }
         }
 
@@ -470,7 +504,7 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
-        // RGBA→NV12 + D2H on per-slot stream
+        // RGBA->NV12 + D2H on per-slot stream
         launch_rgba_to_nv12(
             slot.d_rgba_dst, m_dstW * 4,
             slot.d_nv12_out, m_dstW,
@@ -485,12 +519,24 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
-        // Encode
-        if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW)) {
-            LogDbg("Encode failed");
-            if (onError) onError(L"编码失败");
-            m_state.store(PipelineState::Error);
-            break;
+        // Encode with sequential PTS for uniform output timing.
+        {
+            int64_t encPts = m_framesEncoded.load();
+            if (encPts % 500 == 0) {
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "GPU: frame %lld (slot %d) pts=%lld seq=%d state=%d",
+                    (long long)encPts, slotIdx,
+                    (long long)slot.pts, slot.seq.load(),
+                    (int)slot.state.load());
+                LogDbg(buf);
+            }
+            if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, encPts)) {
+                LogDbg("Encode failed");
+                if (onError) onError(L"编码失败");
+                m_state.store(PipelineState::Error);
+                break;
+            }
         }
 
         // Mark slot as empty, notify decoder
@@ -552,6 +598,7 @@ cleanup:
         if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
         m_slots[i].d_rgba_src = m_slots[i].d_rgba_dst = nullptr;
         m_slots[i].d_nv12 = m_slots[i].d_nv12_out = nullptr;
+        if (m_slots[i].decodeEvent) { cudaEventDestroy(m_slots[i].decodeEvent); m_slots[i].decodeEvent = nullptr; }
         if (m_slots[i].stream) { cudaStreamDestroy(m_slots[i].stream); m_slots[i].stream = nullptr; }
     }
 

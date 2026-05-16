@@ -40,6 +40,13 @@ struct VideoDecoder::Impl {
     int audioStreamIdx = -1;
     std::vector<AVPacket*>* audioPackets = nullptr;
     AVCodecParameters* audioCodecPar = nullptr;
+
+    // PTS reorder buffer (GPU decode path)
+    // Decodes up to m_reorderDepth frames, then returns earliest PTS (= display order).
+    // Uses av_frame_ref for zero-copy NVDEC surface retention.
+    std::vector<AVFrame*> m_reorderBuffer;
+    AVFrame* m_gpuOutputFrame = nullptr;
+    static const int m_reorderDepth = 8;
 };
 
 VideoDecoder::VideoDecoder() : m(new Impl) {}
@@ -166,6 +173,8 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
                         : (int)(m->fmtCtx->duration * info->fps / AV_TIME_BASE + 1);
     if (info->totalFrames < 0) info->totalFrames = 0;
     info->hasVideo = true;
+    info->srcTimeBaseNum = vs->time_base.num;
+    info->srcTimeBaseDen = vs->time_base.den;
 
     if (codec)
         strncpy(info->videoCodecName, codec->name, sizeof(info->videoCodecName) - 1);
@@ -197,60 +206,73 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
 }
 
 bool VideoDecoder::ReadFrameNV12(uint8_t* outData, int* outStride) {
-    if (!m->fmtCtx || !m->decCtx) return false;
-    if (!DecodeOne()) return false;
-
-    if (m->useHW && m->decoded->format == m->hwPixFmt) {
-        if (av_hwframe_transfer_data(m->swFrame, m->decoded, 0) < 0)
-            return false;
-        int h = m->targetH;
-        int w = m->targetW;
-        for (int y = 0; y < h; y++)
-            memcpy(outData + y * w,
-                   m->swFrame->data[0] + y * m->swFrame->linesize[0], w);
-        int uvH = h / 2;
-        uint8_t* uvDst = outData + w * h;
-        for (int y = 0; y < uvH; y++)
-            memcpy(uvDst + y * w,
-                   m->swFrame->data[1] + y * m->swFrame->linesize[1], w);
-        outStride[0] = w;
-        outStride[1] = w;
-        return true;
-    }
-    {
-        int dstStrides[2] = { m->targetW, m->targetW };
-        uint8_t* dst[2] = { outData, outData + m->targetW * m->targetH };
-
-        m->swsCtx = sws_getCachedContext(m->swsCtx,
-            m->decoded->width, m->decoded->height,
-            (AVPixelFormat)m->decoded->format,
-            m->targetW, m->targetH, AV_PIX_FMT_NV12,
-            SWS_FAST_BILINEAR, NULL, NULL, NULL);
-
-        sws_scale(m->swsCtx, m->decoded->data, m->decoded->linesize,
-                  0, m->decoded->height, dst, dstStrides);
-
-        outStride[0] = m->targetW;
-        outStride[1] = m->targetW;
-        return true;
-    }
+    // CPU decode path is disabled in GPU-only pipeline mode
+    (void)outData;
+    (void)outStride;
+    return false;
 }
 
 bool VideoDecoder::ReadFrameGPU(const uint8_t** outY, int* yPitch,
-                                 const uint8_t** outUV, int* uvPitch) {
+                                 const uint8_t** outUV, int* uvPitch,
+                                 int64_t* outPTS) {
     if (!m->fmtCtx || !m->decCtx) return false;
-    if (!DecodeOne()) return false;
 
-    if (m->useHW && m->decoded->format == m->hwPixFmt) {
-        *outY = reinterpret_cast<const uint8_t*>(
-            reinterpret_cast<uintptr_t>(m->decoded->data[0]));
-        *yPitch = m->decoded->linesize[0];
-        *outUV = reinterpret_cast<const uint8_t*>(
-            reinterpret_cast<uintptr_t>(m->decoded->data[1]));
-        *uvPitch = m->decoded->linesize[1];
-        return true;
+    // Fill reorder buffer: keep decoding until buffer is full or EOF is drained
+    while (m->m_reorderBuffer.size() < m->m_reorderDepth && !(m_eof && m_drainSent)) {
+        if (!DecodeOne()) {
+            // EOF reached or no more frames to drain — will use whatever is in the buffer
+            continue;
+        }
+
+        AVFrame* held = av_frame_alloc();
+        if (!held) break;
+        if (av_frame_ref(held, m->decoded) < 0) {
+            av_frame_free(&held);
+            break;
+        }
+        m->m_reorderBuffer.push_back(held);
     }
-    return false;
+
+    if (m->m_reorderBuffer.empty()) return false;
+
+    // Select the frame with earliest PTS (= display order).
+    // Frames with valid PTS (>=0) sort before invalid PTS (-1 / AV_NOPTS_VALUE).
+    // Among valid PTS, smaller value = earlier display position.
+    // Among invalid PTS, the one that was decoded first (remained in buffer longest)
+    // is output first, preserving at least decode-order determinism.
+    int bestIdx = 0;
+    for (size_t i = 1; i < m->m_reorderBuffer.size(); i++) {
+        int64_t pi = m->m_reorderBuffer[i]->pts;
+        int64_t pb = m->m_reorderBuffer[bestIdx]->pts;
+
+        bool iBetter = false;
+        if (pi >= 0 && pb < 0) {
+            iBetter = true;
+        } else if (pi >= 0 && pb >= 0) {
+            iBetter = pi < pb;
+        }  // else both invalid: keep bestIdx (smallest index = earliest decode order)
+
+        if (iBetter) bestIdx = i;
+    }
+
+    AVFrame* selected = m->m_reorderBuffer[bestIdx];
+    m->m_reorderBuffer.erase(m->m_reorderBuffer.begin() + bestIdx);
+
+    // GPU device pointers from NVDEC surface — valid as long as the AVFrame ref lives.
+    *outY = reinterpret_cast<const uint8_t*>(
+        reinterpret_cast<uintptr_t>(selected->data[0]));
+    *yPitch = selected->linesize[0];
+    *outUV = reinterpret_cast<const uint8_t*>(
+        reinterpret_cast<uintptr_t>(selected->data[1]));
+    *uvPitch = selected->linesize[1];
+    if (outPTS) *outPTS = selected->pts;
+
+    // Retain a ref so the NVDEC surface stays alive until the next ReadFrameGPU call
+    // (the caller must cudaStreamSynchronize / cudaEventSynchronize before then).
+    if (m->m_gpuOutputFrame) av_frame_free(&m->m_gpuOutputFrame);
+    m->m_gpuOutputFrame = selected;
+
+    return true;
 }
 
 void VideoDecoder::Close() {
@@ -266,6 +288,16 @@ void VideoDecoder::Close() {
     m->swsCtx = nullptr;
     m->useHW = false;
     m->hwPixFmt = AV_PIX_FMT_NONE;
+    // Cleanup PTS reorder buffer
+    for (auto* frame : m->m_reorderBuffer) {
+        if (frame) av_frame_free(&frame);
+    }
+    m->m_reorderBuffer.clear();
+    if (m->m_gpuOutputFrame) {
+        av_frame_free(&m->m_gpuOutputFrame);
+        m->m_gpuOutputFrame = nullptr;
+    }
+
     m_eof = false;
     m_drainSent = false;
 }
@@ -276,4 +308,8 @@ void VideoDecoder::SetAudioPacketQueue(void* queue) {
 
 void* VideoDecoder::GetAudioCodecPar() const {
     return m->audioCodecPar;
+}
+
+int64_t VideoDecoder::GetLastPTS() const {
+    return m->m_gpuOutputFrame ? m->m_gpuOutputFrame->pts : -1;
 }

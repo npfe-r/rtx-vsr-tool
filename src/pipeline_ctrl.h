@@ -96,7 +96,11 @@ private:
         uint8_t* d_nv12_out   = nullptr;
 
         cudaStream_t stream = nullptr;
+        cudaEvent_t decodeEvent = nullptr; // NVDEC default-stream → per-slot stream sync
         std::atomic<SlotState> state{SlotState::Empty};
+
+        std::atomic<int> seq{0}; // frame sequence number, set by decode thread
+        int64_t pts = -1;        // presentation timestamp from decoder
 
         int w = 0, h = 0;
         int dstW = 0, dstH = 0;
@@ -107,6 +111,8 @@ private:
     int m_dstW = 0, m_dstH = 0;
     double m_srcFps = 0.0;
     int m_totalFrames = 0;
+    int m_srcTimeBaseNum = 1;
+    int m_srcTimeBaseDen = 30;
 
     VideoDecoder   m_decoder;
     VSRProcessor   m_vsr;

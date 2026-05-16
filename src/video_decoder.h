@@ -16,6 +16,10 @@ struct VideoInfo {
     int audioStreamIndex = -1;
     int audioSampleRate = 0;
     int audioChannels = 0;
+
+    // Source PTS timebase (from video stream)
+    int srcTimeBaseNum = 1;
+    int srcTimeBaseDen = 30;
 };
 
 class VideoDecoder {
@@ -27,15 +31,22 @@ public:
     bool ReadFrameNV12(uint8_t* outData, int* outStride);  // out: stride(y), stride(uv)
 
     // GPU decode: get device pointers directly (no CPU copy)
-    // Y/UV pointers are GPU device pointers valid until next ReadFrame call
+    // Y/UV pointers are GPU device pointers valid until next ReadFrameGPU call
+    // PTS reorder buffer: the decoder maintains a multi-frame buffer and returns
+    // frames in display order (sorted by PTS) — the returned outPTS value reflects
+    // the presentation timestamp from the container.
     bool ReadFrameGPU(const uint8_t** outY, int* yPitch,
-                      const uint8_t** outUV, int* uvPitch);
+                      const uint8_t** outUV, int* uvPitch,
+                      int64_t* outPTS = nullptr);
     bool IsHWDecoding() const;
     void Close();
     bool IsOpen() const;
 
     // Pass a pointer to a std::vector<AVPacket*> for audio packet storage
     void SetAudioPacketQueue(void* queue);
+
+    // Returns PTS of the last decoded frame, or -1 if unavailable
+    int64_t GetLastPTS() const;
 
     // Returns AVCodecParameters* of the audio stream (caller must NOT free)
     void* GetAudioCodecPar() const;

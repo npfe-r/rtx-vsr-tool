@@ -36,7 +36,7 @@ public:
     ~VideoEncoder();
 
     bool Open(const EncodeConfig& cfg, OnEncoderStatus statusCb = nullptr);
-    bool WriteFrameNV12(const uint8_t* data, int yStride, int uvStride);
+    bool WriteFrameNV12(const uint8_t* data, int yStride, int uvStride, int64_t pts);
     void Close();
     bool IsOpen() const;
 

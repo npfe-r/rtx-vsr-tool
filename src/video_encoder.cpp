@@ -184,6 +184,17 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         av_opt_set_int(m->encCtx->priv_data, "cq", cfg.crf, 0);
         av_opt_set(m->encCtx->priv_data, "rc", "vbr", 0);
         av_opt_set_int(m->encCtx->priv_data, "b", 0, 0);
+        // Disable B-frames: NVENC auto-default (bf=-1) enables them for presets
+        // P3-P7, which causes the encoder to internally reorder frames. With
+        // the pipeline's single-send-per-call pattern this produces output with
+        // wrong frame timing. bf=0 ensures PTS == DTS for every frame.
+        av_opt_set_int(m->encCtx->priv_data, "bf", 0, 0);
+        // Disable lookahead — prevent NVENC from buffering frames internally
+        // for rate-control analysis. Lookahead causes the encoder to hold
+        // references across send_frame/receive_packet boundaries, which can
+        // crash when the pipeline reuses m->frame for every call (notably
+        // with AV1 NVENC around frame 22).
+        av_opt_set_int(m->encCtx->priv_data, "rc-lookahead", 0, 0);
     } else {
         char crfStr[8];
         snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
@@ -204,6 +215,15 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
         av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
         av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
+
+        // Disable B-frames for software encoders — same rationale as NVENC bf=0
+        // above: the pipeline sends one frame at a time and expects the encoder
+        // to output the packet immediately. B-frames would cause internal
+        // reordering and produce wrong frame timing.
+        av_opt_set_int(m->encCtx->priv_data, "bf", 0, 0);      // libx264
+        av_opt_set_int(m->encCtx->priv_data, "bframes", 0, 0); // libx265
+        av_opt_set_int(m->encCtx->priv_data, "arnr-maxframes", 0, 0); // libaom-av1 alt-ref
+        av_opt_set_int(m->encCtx->priv_data, "arnr-strength", 0, 0);  // libaom-av1 alt-ref
 
         int tileCols = 0, tileRows = 0;
         if (cfg.width >= 3840) tileCols = 1;
@@ -327,7 +347,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     return true;
 }
 
-bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride) {
+bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride, int64_t pts) {
     if (!m->frame || !m->encCtx) return false;
 
     if (m->pixFmt == AV_PIX_FMT_YUV420P && m->swsCtx) {
@@ -352,7 +372,7 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
                    data + yStride * m->encCtx->height + y * uvStride, uvLineSize);
     }
 
-    m->frame->pts = m->frameCount++;
+    m->frame->pts = pts;
 
     __try {
         if (avcodec_send_frame(m->encCtx, m->frame) < 0) {
@@ -366,19 +386,27 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
     }
 
     AVPacket pkt = { 0 };
-    __try {
-        int ret = avcodec_receive_packet(m->encCtx, &pkt);
-        if (ret >= 0) {
+    while (true) {
+        __try {
+            int ret = avcodec_receive_packet(m->encCtx, &pkt);
+            if (ret < 0) break;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in avcodec_receive_packet");
+            m->encCtxFailed = true;
+            av_packet_unref(&pkt);
+            return false;
+        }
+        __try {
             av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
             pkt.stream_index = m->videoStream->index;
             av_interleaved_write_frame(m->fmtCtx, &pkt);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in av_interleaved_write_frame");
+            m->encCtxFailed = true;
             av_packet_unref(&pkt);
+            return false;
         }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        EncLog("SEH in avcodec_receive_packet");
-        m->encCtxFailed = true;
         av_packet_unref(&pkt);
-        return false;
     }
     return true;
 }
