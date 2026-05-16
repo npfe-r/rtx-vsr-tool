@@ -22,7 +22,7 @@ struct EncodeConfig {
     int audioStreamIdx = -1;
     int audioSampleRate = 0;
     int audioChannels = 0;
-    int audioMode = 2;              // 0=no audio, 1=copy source, 2=AAC encode
+    int audioMode = 1;              // 0=no audio, 1=copy source, 2=AAC encode
     int audioBitrate = 128;         // kbps (AAC)
     void* audioPackets = nullptr;     // std::vector<AVPacket*>*
     void* audioCodecPar = nullptr;    // AVCodecParameters* (copied from source)

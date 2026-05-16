@@ -70,7 +70,7 @@ private:
     int     m_encoderSpeed     = 2;
     int     m_gpuIndex         = 0;
     int     m_containerFormat  = 0;
-    int     m_audioMode        = 2;
+    int     m_audioMode        = 1;
     int     m_audioBitrate     = 128;
     int     m_outputFps        = 0;
     float   m_progressPct      = 0.0f;

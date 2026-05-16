@@ -34,7 +34,7 @@ void Config::Load() {
     m_config.gpuIndex     = r(L"Params", L"GPU", 0);
     m_config.containerFormat = r(L"Params", L"Container", 0);
     m_config.outputFps    = r(L"Params", L"OutputFps", 0);
-    m_config.audioMode = r(L"Params", L"AudioMode", 2);
+    m_config.audioMode = r(L"Params", L"AudioMode", 1);
     m_config.audioBitrate = r(L"Params", L"AudioBitrate", 128);
 
     rs(L"Paths", L"Input",  m_config.lastInputPath,  L"");
