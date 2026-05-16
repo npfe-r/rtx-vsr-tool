@@ -32,7 +32,7 @@ extern "C" void launch_abgr10_to_p010(
     const uint8_t* abgr10, int abgr10_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream);
+    int w, int h, bool bt2020, cudaStream_t stream);
 
 struct PipelineConfig {
     std::wstring inputPath;

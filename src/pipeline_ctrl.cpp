@@ -559,7 +559,7 @@ void PipelineController::ThreadFuncImpl() {
                         slot.d_rgba_dst, m_dstW * 4,
                         encY, encYPitch,
                         encUV, encUVPitch,
-                        m_dstW, m_dstH, slot.stream);
+                        m_dstW, m_dstH, true, slot.stream);
                 } else {
                     launch_rgba_to_nv12(
                         slot.d_rgba_dst, m_dstW * 4,
@@ -588,7 +588,7 @@ void PipelineController::ThreadFuncImpl() {
                         slot.d_rgba_dst, m_dstW * 4,
                         slot.d_nv12_out, outYStride,
                         slot.d_nv12_out + yPlaneBytes, outUVStride,
-                        m_dstW, m_dstH, slot.stream);
+                        m_dstW, m_dstH, true, slot.stream);
                 } else {
                     launch_rgba_to_nv12(
                         slot.d_rgba_dst, m_dstW * 4,

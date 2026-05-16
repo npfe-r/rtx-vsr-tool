@@ -114,62 +114,71 @@ __global__ void rgba_to_nv12_kernel(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// ABGR10 (TrueHDR output) → P010  (BT.2020 10-bit limited range)
+// ABGR10 (TrueHDR output) → P010  (BT.2020 / BT.709, 10-bit limited range)
 // ────────────────────────────────────────────────────────────────────
 // Input:  32-bit ABGR10 packed pixel (A[31:30] B[29:20] G[19:10] R[9:0])
+//         (same layout as X2BGR10LE: bits 0-9=R, 10-19=G, 20-29=B, 30-31=unused)
 // Output: P010 — uint16_t Y  (w×h),  uint16_t UV interleaved (w×h/2)
-// Coefficients are BT.2020 10-bit limited range:
-//   Y  = (( 29*R +  74*G +   7*B + 64) >> 7) + 64
-//   Cb = ((-16*R -  40*G +  56*B + 64) >> 7) + 512
-//   Cr = (( 56*R -  52*G -   5*B + 64) >> 7) + 512
+//         Data in high bits (<< 6) per FFmpeg P010LE convention.
+// Uses floating-point BT.2020 or BT.709 coefficients with strict
+// limited-range clamping (Y: 64-940, UV: 64-960) for accurate HDR output.
+// Each thread processes one 2×2 block (4 pixels) for chroma sharing.
 // ────────────────────────────────────────────────────────────────────
 __global__ void abgr10_to_p010_kernel(
-    const uint8_t* abgr10, int abgr10_pitch,
-    uint8_t* y_plane, int y_pitch,
-    uint8_t* uv_plane, int uv_pitch,
-    int w, int h)
+    const uint8_t* __restrict__ abgr10, int abgr10_pitch,
+    uint8_t* __restrict__ y_plane, int y_pitch,
+    uint8_t* __restrict__ uv_plane, int uv_pitch,
+    int w, int h, bool bt2020)
 {
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= w || y >= h) return;
+    int x = (blockIdx.x * blockDim.x + threadIdx.x) * 2; // left pixel of 2×2 block (even)
+    int y = (blockIdx.y * blockDim.y + threadIdx.y) * 2; // top row   of 2×2 block (even)
+    if (x + 1 >= w || y + 1 >= h) return;
 
     const uint32_t* src = (const uint32_t*)abgr10;
-    uint32_t pixel = src[y * (abgr10_pitch / 4) + x];
 
-    int R = (int)(pixel & 0x3FF);
-    int G = (int)((pixel >> 10) & 0x3FF);
-    int B = (int)((pixel >> 20) & 0x3FF);
+    // BT.2020 or BT.709 Kr/Kb coefficients
+    float Kr = bt2020 ? 0.2627f : 0.2126f;
+    float Kb = bt2020 ? 0.0593f : 0.0722f;
+    float Kg = 1.0f - Kr - Kb;
 
-    // Y — every pixel
-    int Y_val = ((29 * R + 74 * G + 7 * B + 64) >> 7) + 64;
-    uint16_t* y16 = (uint16_t*)y_plane;
-    y16[y * (y_pitch / 2) + x] = (uint16_t)(clamp(Y_val, 0, 1023) << 6);
+    // Accumulate chroma over 2×2 block
+    float sumCb = 0.0f, sumCr = 0.0f;
+    float Ys[2][2];
 
-    // UV — each 2×2 block once (top-left thread)
-    if ((x & 1) == 0 && (y & 1) == 0) {
-        int sumR = 0, sumG = 0, sumB = 0;
-        for (int dy = 0; dy < 2; dy++) {
-            for (int dx = 0; dx < 2; dx++) {
-                int px = x + dx;
-                int py = y + dy;
-                if (px >= w || py >= h) continue;
-                uint32_t p = src[py * (abgr10_pitch / 4) + px];
-                sumR += (int)(p & 0x3FF);
-                sumG += (int)((p >> 10) & 0x3FF);
-                sumB += (int)((p >> 20) & 0x3FF);
-            }
+    for (int dy = 0; dy < 2; ++dy) {
+        const uint32_t* row = src + (y + dy) * (abgr10_pitch / 4);
+        for (int dx = 0; dx < 2; ++dx) {
+            uint32_t p = row[x + dx];
+            float R = (float)(p & 0x3FF)       / 1023.0f;
+            float G = (float)((p >> 10) & 0x3FF) / 1023.0f;
+            float B = (float)((p >> 20) & 0x3FF) / 1023.0f;
+
+            float Yp = Kr * R + Kg * G + Kb * B;
+            Ys[dy][dx] = Yp;
+            sumCb += 0.5f * (B - Yp) / (1.0f - Kb);
+            sumCr += 0.5f * (R - Yp) / (1.0f - Kr);
         }
-        int avgR = sumR / 4;
-        int avgG = sumG / 4;
-        int avgB = sumB / 4;
-        int U_val = ((-16 * avgR - 40 * avgG + 56 * avgB + 64) >> 7) + 512;
-        int V_val = (( 56 * avgR - 52 * avgG -  5 * avgB + 64) >> 7) + 512;
-
-        uint16_t* uv16 = (uint16_t*)uv_plane;
-        int uvRow = y / 2;
-        uv16[uvRow * (uv_pitch / 2) + x]     = (uint16_t)(clamp(U_val, 0, 1023) << 6);
-        uv16[uvRow * (uv_pitch / 2) + x + 1] = (uint16_t)(clamp(V_val, 0, 1023) << 6);
     }
+
+    float avgCb = sumCb * 0.25f;
+    float avgCr = sumCr * 0.25f;
+
+    // Quantise to 10-bit limited range with proper rounding + high-bit shift
+    auto toY  = [](float Y)  -> uint16_t { int v = (int)lrintf(64.0f + Y  * 876.0f); return (uint16_t)(clamp(v, 64, 940) << 6); };
+    auto toUV = [](float C)  -> uint16_t { int v = (int)lrintf(512.0f + C * 896.0f); return (uint16_t)(clamp(v, 64, 960) << 6); };
+
+    // Write Y — 4 pixels per 2×2 block
+    uint16_t* yRow0 = (uint16_t*)(y_plane + (y + 0) * y_pitch);
+    uint16_t* yRow1 = (uint16_t*)(y_plane + (y + 1) * y_pitch);
+    yRow0[x + 0] = toY(Ys[0][0]);
+    yRow0[x + 1] = toY(Ys[0][1]);
+    yRow1[x + 0] = toY(Ys[1][0]);
+    yRow1[x + 1] = toY(Ys[1][1]);
+
+    // Write interleaved UV at chroma resolution (w × h/2)
+    uint16_t* uvRow = (uint16_t*)(uv_plane + (y / 2) * uv_pitch);
+    uvRow[x + 0] = toUV(avgCb);  // U
+    uvRow[x + 1] = toUV(avgCr);  // V
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -207,12 +216,12 @@ extern "C" void launch_abgr10_to_p010(
     const uint8_t* abgr10, int abgr10_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream)
+    int w, int h, bool bt2020, cudaStream_t stream)
 {
     dim3 block(16, 16);
-    dim3 grid((w + 15) / 16, (h + 15) / 16);
+    dim3 grid((w + 31) / 32, (h + 31) / 32);
     abgr10_to_p010_kernel<<<grid, block, 0, stream>>>(
         abgr10, abgr10_pitch,
         y_plane, y_pitch, uv_plane, uv_pitch,
-        w, h);
+        w, h, bt2020);
 }
