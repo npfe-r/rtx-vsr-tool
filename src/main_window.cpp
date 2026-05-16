@@ -641,16 +641,6 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", outFrames);
 
-        static const char* audNames[] = {"无", "复制", "AAC"};
-        ImGui::Text("音频");
-        ImGui::SameLine();
-        if (m_audioMode == 0)
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "无");
-        else if (m_audioMode == 2)
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_audioBitrate);
-        else
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
-
         // Output colour info
         {
             bool outIsHdr = m_trueHdrEnabled;
@@ -665,6 +655,16 @@ void MainWindow::RenderUI()
                 ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "BT.709 gamma  8-bit SDR");
             }
         }
+
+        static const char* audNames[] = {"无", "复制", "AAC"};
+        ImGui::Text("音频");
+        ImGui::SameLine();
+        if (m_audioMode == 0)
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "无");
+        else if (m_audioMode == 2)
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_audioBitrate);
+        else
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
 
         // Encoder compatibility check — update warning for bottom bar
         {
@@ -770,10 +770,8 @@ void MainWindow::RenderUI()
     ImGui::Separator();
 
     // TrueHDR parameter popup
-    ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Once);
-    if (ImGui::BeginPopupModal("truehdr_params", NULL, ImGuiWindowFlags_None)) {
-        ImGui::Text("TrueHDR 参数设置");
-        ImGui::Separator();
+    ImGui::SetNextWindowSize(ImVec2(460, 176), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("TrueHDR 设置", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
         ImGui::Spacing();
 
         auto thdrSlider = [&](const char* label, const char* id, int* val, int minV, int maxV) {
@@ -1041,12 +1039,11 @@ void MainWindow::RenderUI()
         m_showCompletePopup = false;
     }
 
-    if (ImGui::BeginPopupModal("完成", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("视频处理完成！");
-        ImGui::Separator();
+    if (ImGui::BeginPopupModal("完成", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
         ImGui::Text("%s", m_completeStats);
         ImGui::Spacing();
-        if (ImGui::Button("打开输出文件夹", ImVec2(160, 0))) {
+        float btnW = ImGui::GetContentRegionAvail().x;
+        if (ImGui::Button("打开输出文件夹", ImVec2(btnW, 0))) {
             wchar_t outPathW[512];
             widen(m_outputPath, outPathW, 512);
             // Construct explorer.exe /select,"path" to open folder and select the file
@@ -1054,7 +1051,7 @@ void MainWindow::RenderUI()
             swprintf_s(cmd, L"/select,\"%s\"", outPathW);
             ShellExecuteW(nullptr, L"open", L"explorer.exe", cmd, nullptr, SW_SHOW);
         }
-        if (ImGui::Button("确定", ImVec2(120, 0)))
+        if (ImGui::Button("确定", ImVec2(btnW, 0)))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
