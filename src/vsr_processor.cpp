@@ -33,6 +33,16 @@ struct VSRProcessor::Impl {
     CUcontext  cuContext = nullptr;
 };
 
+// NGX is initialised at most once per process lifetime.
+// NVSDK_NGX_CUDA_Init after NVSDK_NGX_CUDA_Shutdown in the same process is not
+// guaranteed to produce a functional NGX state — the second init can succeed
+// on the surface yet crash on the first ProcessFrame call (access violation
+// inside the NGX driver component).  We therefore defer the real NGX shutdown
+// to GlobalShutdown() (process exit) and keep the cuda_api_impl singleton
+// alive across pipeline runs.
+static bool s_ngxInitialized = false;
+static int  s_ngxGpuIndex    = -1;
+
 VSRProcessor::VSRProcessor() : m(new Impl) {}
 VSRProcessor::~VSRProcessor() { Shutdown(); delete m; }
 
@@ -41,7 +51,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
 
     char buf[256];
 
-    // Init CUDA driver API
+    // Init CUDA driver API (idempotent after the first call)
     snprintf(buf, sizeof(buf), "VSR: cuInit(0)...");
     DbgMsg(buf);
     CUresult res = cuInit(0);
@@ -58,28 +68,61 @@ bool VSRProcessor::Initialize(int gpuIndex) {
     if (res != CUDA_SUCCESS) { DbgMsg("VSR: cuDevicePrimaryCtxRetain failed"); return false; }
     DbgMsg("VSR: cuDevicePrimaryCtxRetain OK");
 
-    // Push CUDA context for this thread
-    CUcontext current;
-    cuCtxPushCurrent(m->cuContext);
+    if (!s_ngxInitialized) {
+        // First and only NGX initialisation — once per process lifetime.
+        CUcontext current;
+        cuCtxPushCurrent(m->cuContext);
 
-    DbgMsg("VSR: calling rtx_video_api_cuda_create...");
-    // rtx_video_api_cuda_create handles: NGX init, capability check, VSR feature creation
-    API_BOOL ok = rtx_video_api_cuda_create(
-        m->cuContext,           // CUDA context
-        nullptr,                // CUDA stream (null = default)
-        gpuIndex,               // GPU index
-        API_BOOL_FAIL,          // TrueHDR disabled
-        API_BOOL_SUCCESS        // VSR enabled
-    );
+        DbgMsg("VSR: calling rtx_video_api_cuda_create...");
+        API_BOOL ok = rtx_video_api_cuda_create(
+            m->cuContext,           // CUDA context
+            nullptr,                // CUDA stream (null = default)
+            gpuIndex,               // GPU index
+            API_BOOL_FAIL,          // TrueHDR disabled
+            API_BOOL_SUCCESS        // VSR enabled
+        );
 
-    cuCtxPopCurrent(&current);
+        cuCtxPopCurrent(&current);
 
-    if (ok != API_BOOL_SUCCESS) {
-        DbgMsg("VSR: rtx_video_api_cuda_create failed");
-        cuDevicePrimaryCtxRelease(m->cuDevice);
-        m->cuContext = nullptr;
-        return false;
+        if (ok != API_BOOL_SUCCESS) {
+            DbgMsg("VSR: rtx_video_api_cuda_create failed");
+            cuDevicePrimaryCtxRelease(m->cuDevice);
+            m->cuContext = nullptr;
+            return false;
+        }
+
+        s_ngxInitialized = true;
+        s_ngxGpuIndex    = gpuIndex;
+        DbgMsg("VSR: NGX initialised (first time)");
+    } else if (s_ngxGpuIndex != gpuIndex) {
+        // GPU selection changed — the existing NGX/VSR state is tied to the
+        // previous GPU.  Do a full re-init (same risk as above, but GPU
+        // switching between runs is rare and the user explicitly chose it).
+        DbgMsg("VSR: GPU changed, performing full re-init");
+        GlobalShutdown();
+
+        CUcontext current;
+        cuCtxPushCurrent(m->cuContext);
+        API_BOOL ok = rtx_video_api_cuda_create(
+            m->cuContext, nullptr, gpuIndex,
+            API_BOOL_FAIL, API_BOOL_SUCCESS);
+        cuCtxPopCurrent(&current);
+
+        if (ok != API_BOOL_SUCCESS) {
+            DbgMsg("VSR: rtx_video_api_cuda_create (re-init) failed");
+            cuDevicePrimaryCtxRelease(m->cuDevice);
+            m->cuContext = nullptr;
+            return false;
+        }
+
+        s_ngxInitialized = true;
+        s_ngxGpuIndex    = gpuIndex;
+        DbgMsg("VSR: NGX re-initialised on new GPU");
     }
+    // Same GPU, NGX already initialised: reuse the existing cuda_api_impl
+    // singleton and VSR feature handle.  The evaluate function recreates
+    // internal CUDA arrays lazily if frame dimensions changed, so no
+    // re-creation of the VSR feature is needed here.
 
     m_initialized = true;
     DbgMsg("VSR: initialized successfully");
@@ -115,15 +158,32 @@ bool VSRProcessor::ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
 
 void VSRProcessor::Shutdown() {
     if (m_initialized) {
-        CUcontext current;
-        cuCtxPushCurrent(m->cuContext);
-        rtx_video_api_cuda_shutdown();
-        cuCtxPopCurrent(&current);
-
+        // Release the CUDA primary context reference.  We do NOT call
+        // rtx_video_api_cuda_shutdown() here — NGX must stay alive for the
+        // entire process lifetime (see the comment at the top of this file).
         if (m->cuContext) {
             cuDevicePrimaryCtxRelease(m->cuDevice);
             m->cuContext = nullptr;
         }
         m_initialized = false;
+    }
+}
+
+void VSRProcessor::GlobalShutdown() {
+    if (s_ngxInitialized) {
+        // NGX shutdown requires a current CUDA context on the calling thread.
+        // Retain the primary context temporarily, push it, then clean up.
+        CUdevice dev;
+        CUcontext ctx = nullptr;
+        if (cuDeviceGet(&dev, s_ngxGpuIndex) == CUDA_SUCCESS &&
+            cuDevicePrimaryCtxRetain(&ctx, dev) == CUDA_SUCCESS)
+        {
+            CUcontext prev;
+            cuCtxPushCurrent(ctx);
+            rtx_video_api_cuda_shutdown();
+            cuCtxPopCurrent(&prev);
+            cuDevicePrimaryCtxRelease(dev);
+        }
+        s_ngxInitialized = false;
     }
 }

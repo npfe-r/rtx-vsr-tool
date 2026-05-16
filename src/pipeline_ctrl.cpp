@@ -81,7 +81,10 @@ static bool SafeVSRProcess(VSRFrameContext* ctx)
 }
 
 PipelineController::PipelineController() {}
-PipelineController::~PipelineController() { Stop(); }
+PipelineController::~PipelineController() {
+    Stop();
+    VSRProcessor::GlobalShutdown();
+}
 
 void PipelineController::CalculateOutputSize(int srcW, int srcH, int& dstW, int& dstH) const {
     switch (m_cfg.outputMode) {
@@ -220,7 +223,13 @@ void PipelineController::DecodeFunc() {
 
 static void SafeCleanup(VideoEncoder& enc, VSRProcessor& vsr, VideoDecoder& dec) {
     __try { enc.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in encoder.Close()"); }
-    __try { vsr.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in vsr.Shutdown()"); }
+    // VSR shutdown is intentionally NOT called between pipeline runs.
+    // NGX does not support clean re-initialisation in the same process —
+    // calling rtx_video_api_cuda_shutdown() followed by a second
+    // rtx_video_api_cuda_create() can produce a crash on the first
+    // ProcessFrame (access violation in NGX driver internals).
+    // Real NGX shutdown is deferred to VSRProcessor::GlobalShutdown()
+    // which runs at process exit.
     __try { dec.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) { LogDbg("SEH in decoder.Close()"); }
 }
 
