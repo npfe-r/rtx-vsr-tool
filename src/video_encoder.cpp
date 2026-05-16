@@ -75,6 +75,7 @@ static const char* GetEncoderName(int id) {
         case 3:  return "libx264";
         case 4:  return "libx265";
         case 5:  return "libaom-av1";
+        case 6:  return "libsvtav1";
         default: return "h264_nvenc";
     }
 }
@@ -92,6 +93,7 @@ static const char* GetDisplayName(const char* name) {
     if (strcmp(name, "libx264") == 0) return "libx264";
     if (strcmp(name, "libx265") == 0) return "libx265";
     if (strcmp(name, "libaom-av1") == 0) return "libaom-av1";
+    if (strcmp(name, "libsvtav1") == 0) return "SVT-AV1";
     return name;
 }
 
@@ -282,6 +284,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
             av_opt_set_int(m->encCtx->priv_data, "arnr-strength", 0, 0);
             av_opt_set_int(m->encCtx->priv_data, "tile-columns", cfg.width >= 3840 ? 1 : 0, 0);
             av_opt_set_int(m->encCtx->priv_data, "tile-rows", cfg.height >= 2160 ? 1 : 0, 0);
+        } else if (strcmp(encName, "libsvtav1") == 0) {
+            int svtPreset = 8;
+            switch (idx) {
+                case 0: svtPreset = 12; break;
+                case 1: svtPreset = 10; break;
+                case 2: svtPreset = 8;  break;
+                case 3: svtPreset = 4;  break;
+                case 4: svtPreset = 2;  break;
+            }
+            av_opt_set_int(m->encCtx->priv_data, "preset", svtPreset, 0);
         } else {
             EncLog("Unknown software encoder, setting only CRF");
         }

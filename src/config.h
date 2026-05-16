@@ -19,7 +19,7 @@ struct VSRConfig {
     int fixedWidth = 3840;
     int fixedHeight = 2160;
     int encoderIndex = 0;           // 0=H.264 NVENC, 1=H.265 NVENC, 2=AV1 NVENC,
-                                    // 3=libx264, 4=libx265, 5=libaom-av1
+                                    // 3=libx264, 4=libx265, 5=libaom-av1, 6=SVT-AV1
     int crf = 18;
     int encoderSpeed = 2;           // 0=fast ... 4=slow
     int gpuIndex = 0;

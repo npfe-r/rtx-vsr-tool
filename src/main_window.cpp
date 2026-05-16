@@ -746,9 +746,9 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* encoderNames[] = {
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
-        "libx264", "libx265", "libaom-av1"
+        "libx264", "libx265", "libaom-av1", "SVT-AV1"
     };
-    if (ImGui::Combo("##enc", &m_encoderIndex, encoderNames, 6))
+    if (ImGui::Combo("##enc", &m_encoderIndex, encoderNames, 7))
         m_config.Get().encoderIndex = m_encoderIndex;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
