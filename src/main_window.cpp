@@ -547,6 +547,31 @@ void MainWindow::RenderUI()
         ImGui::Text("帧数");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", m_videoInfo.totalFrames);
+
+        // Input colour info
+        {
+            const char* trc  = "";
+            if (m_videoInfo.avColorTransfer == 1) trc = "BT.709";
+            else if (m_videoInfo.avColorTransfer == 16) trc = "PQ";
+            else if (m_videoInfo.avColorTransfer == 18) trc = "HLG";
+            else trc = "SDR";
+            const char* range = (m_videoInfo.avColorRange == 2) ? "full" : "limited";
+            const char* cs = "";
+            if (m_videoInfo.avColorSpace == 1) cs = "BT.709";
+            else if (m_videoInfo.avColorSpace == 9) cs = "BT.2020";
+            else if (m_videoInfo.avColorSpace == 5 || m_videoInfo.avColorSpace == 6) cs = "BT.601";
+            else cs = "未知";
+            bool isHdr = (m_videoInfo.avColorTransfer == 16 || m_videoInfo.avColorTransfer == 18);
+            char colorBuf[128];
+            snprintf(colorBuf, sizeof(colorBuf), "%s  %s  %s", cs, trc, range);
+            ImGui::Text("色彩");
+            ImGui::SameLine();
+            if (isHdr)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1), "%s", colorBuf);
+            else
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", colorBuf);
+        }
+
         if (m_videoInfo.hasAudio) {
             char audioBuf[96];
             if (m_videoInfo.audioCodecName[0])
@@ -626,10 +651,19 @@ void MainWindow::RenderUI()
         else
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
 
-        if (m_trueHdrEnabled) {
-            ImGui::Text("HDR");
+        // Output colour info
+        {
+            bool outIsHdr = m_trueHdrEnabled;
+            bool inIsHdr  = (m_videoInfo.avColorTransfer == 16 || m_videoInfo.avColorTransfer == 18);
+            ImGui::Text("色彩");
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.4f, 1), "TrueHDR 10-bit BT.2020 PQ");
+            if (outIsHdr) {
+                ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.4f, 1), "BT.2020 PQ  10-bit HDR");
+            } else if (inIsHdr) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1), "BT.709 gamma  8-bit SDR  (HDR注入)");
+            } else {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "BT.709 gamma  8-bit SDR");
+            }
         }
 
         // Encoder compatibility check — update warning for bottom bar
@@ -711,11 +745,10 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // TrueHDR toggle
+    // TrueHDR toggle + params button
     ImGui::AlignTextToFramePadding();
     ImGui::Text("HDR");
     ImGui::SameLine(labelW);
-    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     {
         bool hdrOn = (m_trueHdrEnabled != 0);
@@ -726,11 +759,62 @@ void MainWindow::RenderUI()
                 m_encoderIndex = 1;
         }
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "TrueHDR (HDR 色调映射)");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "TrueHDR");
+        ImGui::SameLine();
+        float btnW = ImGui::GetContentRegionAvail().x;
+        if (ImGui::Button("参数设置", ImVec2(btnW, 0))) {
+            ImGui::OpenPopup("truehdr_params");
+        }
     }
     if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
     ImGui::Separator();
+
+    // TrueHDR parameter popup
+    ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Once);
+    if (ImGui::BeginPopupModal("truehdr_params", NULL, ImGuiWindowFlags_None)) {
+        ImGui::Text("TrueHDR 参数设置");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        auto thdrSlider = [&](const char* label, const char* id, int* val, int minV, int maxV) {
+            ImGui::Text("%s", label);
+            ImGui::SameLine(78.0f);
+            float sliderW = ImGui::GetContentRegionAvail().x - 56.0f;
+            ImGui::PushItemWidth(sliderW);
+            ImGui::PushID(id);
+            ImGui::SliderInt("##sl", val, minV, maxV, "%d");
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            ImGui::PushItemWidth(46.0f);
+            ImGui::InputInt("##in", val, 0, 0);
+            ImGui::PopItemWidth();
+            ImGui::PopID();
+            if (*val < minV) *val = minV;
+            if (*val > maxV) *val = maxV;
+        };
+
+        thdrSlider("对比度",   "c", &m_thdrContrast,    0,   200);
+        thdrSlider("饱和度",   "s", &m_thdrSaturation,  0,   200);
+        thdrSlider("中间灰",   "m", &m_thdrMiddleGray,  10,  100);
+        thdrSlider("峰值亮度", "l", &m_thdrMaxLuminance, 400, 2000);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        float btnW = (ImGui::GetContentRegionAvail().x - 8) * 0.5f;
+        if (ImGui::Button("关闭", ImVec2(btnW, 0))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("恢复默认", ImVec2(btnW, 0))) {
+            m_thdrContrast    = 100;
+            m_thdrSaturation  = 100;
+            m_thdrMiddleGray  = 50;
+            m_thdrMaxLuminance = 1000;
+        }
+
+        ImGui::EndPopup();
+    }
 
     // Output Size
     ImGui::AlignTextToFramePadding();
@@ -1131,6 +1215,10 @@ void MainWindow::OnStartStop()
         pc.audioBitrate = m_audioBitrate;
         pc.outputFps    = m_outputFps;
         pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
+        pc.thdrContrast    = m_thdrContrast;
+        pc.thdrSaturation  = m_thdrSaturation;
+        pc.thdrMiddleGray  = m_thdrMiddleGray;
+        pc.thdrMaxLuminance = m_thdrMaxLuminance;
 
         cfg.qualityLevel = m_qualityLevel;
         cfg.outputMode   = m_outputMode;
@@ -1257,7 +1345,11 @@ void MainWindow::LoadConfigToUI()
     m_audioMode    = cfg.audioMode;
     m_audioBitrate    = cfg.audioBitrate;
     m_outputFps       = cfg.outputFps;
-    m_trueHdrEnabled  = cfg.trueHdrEnabled;
+    m_trueHdrEnabled    = cfg.trueHdrEnabled;
+    m_thdrContrast      = cfg.thdrContrast;
+    m_thdrSaturation    = cfg.thdrSaturation;
+    m_thdrMiddleGray    = cfg.thdrMiddleGray;
+    m_thdrMaxLuminance  = cfg.thdrMaxLuminance;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -1280,4 +1372,8 @@ void MainWindow::SaveUIToConfig()
     cfg.audioBitrate    = m_audioBitrate;
     cfg.outputFps       = m_outputFps;
     cfg.trueHdrEnabled  = m_trueHdrEnabled;
+    cfg.thdrContrast    = m_thdrContrast;
+    cfg.thdrSaturation  = m_thdrSaturation;
+    cfg.thdrMiddleGray  = m_thdrMiddleGray;
+    cfg.thdrMaxLuminance = m_thdrMaxLuminance;
 }

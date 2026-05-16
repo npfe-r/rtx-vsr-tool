@@ -34,6 +34,12 @@ extern "C" void launch_abgr10_to_p010(
     uint8_t* uv_plane, int uv_pitch,
     int w, int h, bool bt2020, cudaStream_t stream);
 
+extern "C" void launch_p010_to_rgba_sdr(
+    const uint8_t* y_plane, int y_pitch,
+    const uint8_t* uv_plane, int uv_pitch,
+    uint8_t* rgba_out, int rgba_pitch,
+    int w, int h, int transfer, cudaStream_t stream);
+
 struct PipelineConfig {
     std::wstring inputPath;
     std::wstring outputPath;
@@ -50,6 +56,10 @@ struct PipelineConfig {
     int audioMode = 1;
     int audioBitrate = 128;
     bool trueHdrEnabled = false;
+    int  thdrContrast    = 100;
+    int  thdrSaturation  = 100;
+    int  thdrMiddleGray  = 50;
+    int  thdrMaxLuminance = 1000;
 };
 
 struct PipelineProgress {

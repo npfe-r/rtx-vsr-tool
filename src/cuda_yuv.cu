@@ -182,6 +182,134 @@ __global__ void abgr10_to_p010_kernel(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// P010 (10-bit YUV, HDR) → RGBA (8-bit sRGB, SDR)
+// HDR to SDR tonemapping for native HDR video input.
+// ────────────────────────────────────────────────────────────────────
+// Each thread handles one output pixel.
+// y_plane:  uint16_t[w × h]    10-bit in high bits (15:6), pitch in bytes
+// uv_plane: uint16_t[w × h/2]  interleaved U/V, pitch in bytes
+// rgba_out: uint8_t[w × h × 4] RGBA, pitch in bytes
+// transfer: 16=PQ(ST.2084), 18=HLG, others=matrix-only (no tonemap)
+// ────────────────────────────────────────────────────────────────────
+
+// PQ EOTF (ST.2084): non-linear PQ → linear light (nits)
+static __device__ __forceinline__ float pq_eotf(float v) {
+    const float m1 = 2610.0f / 16384.0f;
+    const float m2 = 2523.0f / 32.0f;
+    const float c1 = 3424.0f / 4096.0f;
+    const float c2 = 2413.0f / 128.0f;
+    const float c3 = 2392.0f / 128.0f;
+    float vp = powf(fmaxf(v, 0.0f), 1.0f / m2);
+    return powf(fmaxf(vp - c1, 0.0f) / fmaxf(c2 - c3 * vp, 1e-6f), 1.0f / m1);
+}
+
+// HLG OETF^-1 (linearization): non-linear HLG → linear scene light
+static __device__ __forceinline__ float hlg_oetf_inv(float v) {
+    const float a = 0.17883277f;
+    const float b = 0.28466892f;
+    const float c = 0.55991073f;
+    if (v <= 0.5f)
+        return (v * v) / 3.0f;
+    else
+        return expf((v - c) / a) + b;
+}
+
+static __device__ __forceinline__ float clampf(float v, float lo, float hi) {
+    return fminf(fmaxf(v, lo), hi);
+}
+
+__global__ void p010_to_rgba_sdr_kernel(
+    const uint8_t* __restrict__ y_plane, int y_pitch,
+    const uint8_t* __restrict__ uv_plane, int uv_pitch,
+    uint8_t* __restrict__ rgba_out, int rgba_pitch,
+    int w, int h, int transfer)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+
+    // P010: 10-bit data stored in uint16_t high bits (15:6), low bits zero
+    const uint16_t* Y16 = (const uint16_t*)(y_plane + y * y_pitch);
+    const uint16_t* UV16 = (const uint16_t*)(uv_plane + (y / 2) * uv_pitch);
+
+    int yCode = Y16[x] >> 6;              // 10-bit Y code [0, 1023]
+    int uCode = UV16[(x & ~1)] >> 6;      // 10-bit U code
+    int vCode = UV16[(x & ~1) + 1] >> 6;  // 10-bit V code
+
+    // Undo limited range: Y [64,940] → [0,1], UV [64,960] → center at 512
+    float Ynrm = (float)(yCode - 64) / 876.0f;
+    float Unrm = (float)(uCode - 512) / 896.0f;
+    float Vnrm = (float)(vCode - 512) / 896.0f;
+
+    // BT.2020 NC YUV → non-linear RGB (same colour space as input transfer)
+    float Rnl = Ynrm + 1.4746f * Vnrm;
+    float Gnl = Ynrm - 0.1646f * Unrm - 0.5714f * Vnrm;
+    float Bnl = Ynrm + 1.8814f * Unrm;
+
+    Rnl = clampf(Rnl, 0.0f, 1.0f);
+    Gnl = clampf(Gnl, 0.0f, 1.0f);
+    Bnl = clampf(Bnl, 0.0f, 1.0f);
+
+    float Rlin, Glin, Blin;
+
+    if (transfer == 16) {  // PQ (ST.2084)
+        // EOTF: non-linear PQ → linear light (nits)
+        Rlin = pq_eotf(Rnl);
+        Glin = pq_eotf(Gnl);
+        Blin = pq_eotf(Bnl);
+
+        // Luminance-based Reinhard tonemapping (SDR target ~100 nits)
+        float L = 0.2126f * Rlin + 0.7152f * Glin + 0.0722f * Blin;
+        float scale = 1.0f / (1.0f + L / 100.0f);
+        Rlin *= scale;
+        Glin *= scale;
+        Blin *= scale;
+    } else if (transfer == 18) {  // HLG
+        // OETF^-1: non-linear HLG → linear scene light
+        Rlin = hlg_oetf_inv(Rnl);
+        Glin = hlg_oetf_inv(Gnl);
+        Blin = hlg_oetf_inv(Bnl);
+
+        // HLG nominal peak ~1000 nits, scale to SDR reference
+        float L = 0.2126f * Rlin + 0.7152f * Glin + 0.0722f * Blin;
+        float scale = 1.0f / (1.0f + L * 10.0f);  // ×10: map HLG peak → SDR
+        Rlin *= scale;
+        Glin *= scale;
+        Blin *= scale;
+    } else {
+        // Unknown/unspecified: treat linear already, no tonemap
+        Rlin = Rnl;
+        Glin = Gnl;
+        Blin = Bnl;
+    }
+
+    // BT.2020 linear → BT.709 linear gamut conversion
+    float r709 = 1.6605f * Rlin - 0.5876f * Glin - 0.0728f * Blin;
+    float g709 = -0.1246f * Rlin + 1.1329f * Glin - 0.0083f * Blin;
+    float b709 = -0.0182f * Rlin - 0.1006f * Glin + 1.1187f * Blin;
+
+    r709 = clampf(r709, 0.0f, 1.0f);
+    g709 = clampf(g709, 0.0f, 1.0f);
+    b709 = clampf(b709, 0.0f, 1.0f);
+
+    // sRGB gamma encoding (linear → non-linear 8-bit)
+    auto srgb_encode = [](float c) -> uint8_t {
+        float cs;
+        if (c <= 0.0031308f)
+            cs = 12.92f * c;
+        else
+            cs = 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+        return (uint8_t)(clamp((int)(cs * 255.0f + 0.5f), 0, 255));
+    };
+
+    int out_idx = y * rgba_pitch + x * 4;
+    rgba_out[out_idx + 0] = srgb_encode(r709);
+    rgba_out[out_idx + 1] = srgb_encode(g709);
+    rgba_out[out_idx + 2] = srgb_encode(b709);
+    rgba_out[out_idx + 3] = 0xFF;
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Host-callable wrappers
 // ────────────────────────────────────────────────────────────────────
 
@@ -224,4 +352,17 @@ extern "C" void launch_abgr10_to_p010(
         abgr10, abgr10_pitch,
         y_plane, y_pitch, uv_plane, uv_pitch,
         w, h, bt2020);
+}
+
+extern "C" void launch_p010_to_rgba_sdr(
+    const uint8_t* y_plane, int y_pitch,
+    const uint8_t* uv_plane, int uv_pitch,
+    uint8_t* rgba_out, int rgba_pitch,
+    int w, int h, int transfer, cudaStream_t stream)
+{
+    dim3 block(16, 16);
+    dim3 grid((w + 15) / 16, (h + 15) / 16);
+    p010_to_rgba_sdr_kernel<<<grid, block, 0, stream>>>(
+        y_plane, y_pitch, uv_plane, uv_pitch,
+        rgba_out, rgba_pitch, w, h, transfer);
 }

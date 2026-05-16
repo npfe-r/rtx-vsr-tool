@@ -172,11 +172,22 @@ void PipelineController::DecodeFunc() {
             cudaEventRecord(slot.decodeEvent, 0);
             cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
 
-            launch_nv12_to_rgba(
-                yDev, yPitch,
-                uvDev, uvPitch,
-                slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream, m_colorMatrix);
+            // HDR input (PQ/HLG): NVDEC outputs P010, need HDR→SDR tonemapping.
+            // SDR input: use standard NV12→RGBA with detected colour matrix.
+            bool isHdr = (m_avColorTransfer == 16 || m_avColorTransfer == 18);
+            if (isHdr) {
+                launch_p010_to_rgba_sdr(
+                    yDev, yPitch,
+                    uvDev, uvPitch,
+                    slot.d_rgba_src, m_srcW * 4,
+                    m_srcW, m_srcH, m_avColorTransfer, slot.stream);
+            } else {
+                launch_nv12_to_rgba(
+                    yDev, yPitch,
+                    uvDev, uvPitch,
+                    slot.d_rgba_src, m_srcW * 4,
+                    m_srcW, m_srcH, slot.stream, m_colorMatrix);
+            }
         } else {
             int stride = m_srcW;
             if (!m_decoder.ReadFrameNV12(slot.nv12_cpu, &stride)) {
@@ -307,6 +318,11 @@ void PipelineController::ThreadFuncImpl() {
             "PIP: color: avCS=%d avRange=%d → matrix=%d",
             info.avColorSpace, info.avColorRange, m_colorMatrix);
           LogMsg("PIP: ",_b); }
+        if (info.avColorTransfer == 16) {
+            LogMsg("PIP: ","HDR input detected: PQ (ST.2084) — will tonemap to SDR");
+        } else if (info.avColorTransfer == 18) {
+            LogMsg("PIP: ","HDR input detected: HLG (ARIB STD-B67) — will tonemap to SDR");
+        }
     }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
@@ -388,6 +404,12 @@ void PipelineController::ThreadFuncImpl() {
         goto cleanup;
     }
     LogStatus(onStatus, "VSR 初始化完成");
+
+    // Apply TrueHDR parameters from config
+    if (m_trueHdrEnabled) {
+        m_vsr.SetTrueHdrParams(m_cfg.thdrContrast, m_cfg.thdrSaturation,
+                                m_cfg.thdrMiddleGray, m_cfg.thdrMaxLuminance);
+    }
 
     // ---- Open encoder ----
     LogStatus(onStatus, "打开编码器...");

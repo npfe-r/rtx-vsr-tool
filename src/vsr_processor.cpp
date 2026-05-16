@@ -13,6 +13,10 @@ struct VSRProcessor::Impl {
     CUdevice   cuDevice  = 0;
     CUcontext  cuContext = nullptr;
     bool       trueHdrEnabled = false;
+    int        thdrContrast    = 100;
+    int        thdrSaturation  = 100;
+    int        thdrMiddleGray  = 50;
+    int        thdrMaxLuminance = 1000;
 };
 
 // NGX is initialised at most once per process lifetime.
@@ -131,10 +135,10 @@ bool VSRProcessor::ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
     API_THDR_Setting thdrSetting;
     API_THDR_Setting* pThdrSetting = nullptr;
     if (m->trueHdrEnabled) {
-        thdrSetting.Contrast    = 100;  // SDK default (range 0–200)
-        thdrSetting.Saturation  = 100;  // SDK default (range 0–200)
-        thdrSetting.MiddleGray  = 50;   // SDK default (range 10–100)
-        thdrSetting.MaxLuminance = 1000; // reasonable HDR display peak (range 400–2000)
+        thdrSetting.Contrast    = m->thdrContrast;
+        thdrSetting.Saturation  = m->thdrSaturation;
+        thdrSetting.MiddleGray  = m->thdrMiddleGray;
+        thdrSetting.MaxLuminance = m->thdrMaxLuminance;
         pThdrSetting = &thdrSetting;
     }
 
@@ -149,6 +153,13 @@ bool VSRProcessor::ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
 
     cuCtxPopCurrent(&current);
     return ok == API_BOOL_SUCCESS;
+}
+
+void VSRProcessor::SetTrueHdrParams(int contrast, int saturation, int middleGray, int maxLuminance) {
+    m->thdrContrast    = contrast;
+    m->thdrSaturation  = saturation;
+    m->thdrMiddleGray  = middleGray;
+    m->thdrMaxLuminance = maxLuminance;
 }
 
 void VSRProcessor::Shutdown() {

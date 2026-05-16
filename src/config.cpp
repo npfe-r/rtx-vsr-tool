@@ -35,6 +35,10 @@ void Config::Load() {
     m_config.audioMode = r(L"Params", L"AudioMode", 1);
     m_config.audioBitrate = r(L"Params", L"AudioBitrate", 128);
     m_config.trueHdrEnabled = r(L"Params", L"TrueHdr", 0);
+    m_config.thdrContrast    = r(L"Params", L"THDR_Contrast", 100);
+    m_config.thdrSaturation  = r(L"Params", L"THDR_Saturation", 100);
+    m_config.thdrMiddleGray  = r(L"Params", L"THDR_MiddleGray", 50);
+    m_config.thdrMaxLuminance = r(L"Params", L"THDR_MaxLuminance", 1000);
 
     rs(L"Paths", L"Input",  m_config.lastInputPath,  L"");
     rs(L"Paths", L"Output", m_config.lastOutputPath, L"");
@@ -61,6 +65,10 @@ void Config::Save() {
     w(L"Params", L"AudioMode", m_config.audioMode);
     w(L"Params", L"AudioBitrate", m_config.audioBitrate);
     w(L"Params", L"TrueHdr", m_config.trueHdrEnabled);
+    w(L"Params", L"THDR_Contrast",    m_config.thdrContrast);
+    w(L"Params", L"THDR_Saturation",  m_config.thdrSaturation);
+    w(L"Params", L"THDR_MiddleGray",  m_config.thdrMiddleGray);
+    w(L"Params", L"THDR_MaxLuminance", m_config.thdrMaxLuminance);
 
     WritePrivateProfileStringW(L"Paths", L"Input",  m_config.lastInputPath,  path.c_str());
     WritePrivateProfileStringW(L"Paths", L"Output", m_config.lastOutputPath, path.c_str());

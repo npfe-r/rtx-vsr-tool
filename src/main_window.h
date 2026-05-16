@@ -75,6 +75,10 @@ private:
     int     m_audioBitrate     = 128;
     int     m_outputFps        = 0;
     int     m_trueHdrEnabled   = 0;
+    int     m_thdrContrast    = 100;
+    int     m_thdrSaturation  = 100;
+    int     m_thdrMiddleGray  = 50;
+    int     m_thdrMaxLuminance = 1000;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]    = {};
     char    m_encoderWarning[256] = {};

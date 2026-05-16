@@ -18,6 +18,7 @@ public:
     bool ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
                       int srcW, int srcH, int dstW, int dstH,
                       VSRQuality quality);
+    void SetTrueHdrParams(int contrast, int saturation, int middleGray, int maxLuminance);
     void Shutdown();
     bool IsInitialized() const { return m_initialized; }
 
