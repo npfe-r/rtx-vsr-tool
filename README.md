@@ -213,6 +213,7 @@ src/
 ├── video_encoder.cpp / .h        # FFmpeg 编码（NVENC/软件）、音频转码/复用
 ├── cuda_yuv.cu                   # 自定义 CUDA 核函数：NV12 ↔ RGBA 色彩空间转换
 ├── ngx_init_test.cpp             # 独立 NGX 初始化诊断工具（可单独构建）
+├── test_cuda_enc.cpp             # CUDA hwcontext 诊断（已禁用编译）
 ├── config.cpp / .h               # INI 配置文件读写（基于 Windows GetPrivateProfileString）
 └── include/
     ├── nvsdk_ngx*.h              # NGX SDK 头文件（14 个）
@@ -244,6 +245,8 @@ src/
 - **项目名**：`RTX_VSR_Tool`，版本 1.0.0，语言 C++17 + CUDA
 - **CUDA 架构**：默认 `75;86;89`（Turing / Ampere / Ada），构建脚本扩展了 `100`（Blackwell）
 - **源文件收集**：使用 `file(GLOB_RECURSE src/*.cpp src/*.cu)`，添加新文件后需重新运行 cmake
+- **源文件过滤**：`test_cuda_enc.cpp` 通过 `list(FILTER ... EXCLUDE REGEX)` 从主目标中排除，原为独立诊断目标，当前已禁用编译
+- **CUDA 架构**：`CMakeLists.txt` 注释中写 Blackwell=120，但构建脚本实际传递 `100`——以构建脚本为准
 - **Post-build 步骤**：自动复制 2 个 RTX SDK DLL + 5 个 FFmpeg DLL 到输出目录
 - **MSVC 标志**：`/utf-8` 确保中文 UI 文本正确显示
 
