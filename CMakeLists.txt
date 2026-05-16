@@ -64,12 +64,12 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
 )
 
 # CUDA hwcontext + NVENC zero-copy test (standalone, no GUI, no NGX dependency)
-add_executable(test_cuda_enc src/test_cuda_enc.cpp)
-target_link_libraries(test_cuda_enc PRIVATE
-    FFmpeg::avcodec
-    FFmpeg::avformat
-    FFmpeg::avutil
-)
+# Disabled: add_executable(test_cuda_enc src/test_cuda_enc.cpp)
+# target_link_libraries(test_cuda_enc PRIVATE
+#     FFmpeg::avcodec
+#     FFmpeg::avformat
+#     FFmpeg::avutil
+# )
 
 # Copy SDK DLLs to output dir
 add_custom_command(TARGET RTX_VSR_Tool POST_BUILD
