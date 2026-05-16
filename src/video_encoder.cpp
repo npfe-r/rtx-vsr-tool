@@ -574,7 +574,10 @@ void VideoEncoder::Close() {
                         m->audioDecCtx->sample_rate,
                         AV_ROUND_UP);
                     av_frame_unref(m->audioEncFrame);
-                    m->audioEncFrame->nb_samples = dstSamples;
+                    m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
+                    m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
+                    m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+                    m->audioEncFrame->nb_samples  = dstSamples;
                     av_frame_get_buffer(m->audioEncFrame, 0);
                     swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
                     avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
@@ -595,7 +598,10 @@ void VideoEncoder::Close() {
                     m->audioDecCtx->sample_rate,
                     AV_ROUND_UP);
                 av_frame_unref(m->audioEncFrame);
-                m->audioEncFrame->nb_samples = dstSamples;
+                m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
+                m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
+                m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+                m->audioEncFrame->nb_samples  = dstSamples;
                 av_frame_get_buffer(m->audioEncFrame, 0);
                 swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
                 avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
