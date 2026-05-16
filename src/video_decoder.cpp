@@ -44,7 +44,10 @@ struct VideoDecoder::Impl {
     // PTS reorder buffer (GPU decode path)
     // Decodes up to m_reorderDepth frames, then returns earliest PTS (= display order).
     // Uses av_frame_ref for zero-copy NVDEC surface retention.
+    // m_reorderAges[i] tracks how many times the corresponding frame was
+    // passed over (not selected) — prevents invalid-PTS frames from starving.
     std::vector<AVFrame*> m_reorderBuffer;
+    std::vector<int>      m_reorderAges;
     AVFrame* m_gpuOutputFrame = nullptr;
     static const int m_reorderDepth = 8;
 };
@@ -231,6 +234,7 @@ bool VideoDecoder::ReadFrameGPU(const uint8_t** outY, int* yPitch,
             break;
         }
         m->m_reorderBuffer.push_back(held);
+        m->m_reorderAges.push_back(0);
     }
 
     if (m->m_reorderBuffer.empty()) return false;
@@ -240,23 +244,47 @@ bool VideoDecoder::ReadFrameGPU(const uint8_t** outY, int* yPitch,
     // Among valid PTS, smaller value = earlier display position.
     // Among invalid PTS, the one that was decoded first (remained in buffer longest)
     // is output first, preserving at least decode-order determinism.
+    //
+    // Starvation guard: an invalid-PTS frame that has been passed over more than
+    // m_reorderDepth * 2 times is force-selected.  This prevents a small number
+    // of PTS-less frames from being perpetually delayed by a steady stream of
+    // valid-PTS frames, which manifests as a "stray old frame" ~1 s into output.
     int bestIdx = 0;
-    for (size_t i = 1; i < m->m_reorderBuffer.size(); i++) {
-        int64_t pi = m->m_reorderBuffer[i]->pts;
-        int64_t pb = m->m_reorderBuffer[bestIdx]->pts;
+    {
+        const int kMaxReorderAge = m->m_reorderDepth * 2; // ~16 frames
+        bool forced = false;
+        for (size_t i = 0; i < m->m_reorderBuffer.size(); i++) {
+            if (m->m_reorderAges[i] > kMaxReorderAge &&
+                m->m_reorderBuffer[i]->pts < 0) {
+                bestIdx = i;
+                forced = true;
+                break;
+            }
+        }
+        if (!forced) {
+            for (size_t i = 1; i < m->m_reorderBuffer.size(); i++) {
+                int64_t pi = m->m_reorderBuffer[i]->pts;
+                int64_t pb = m->m_reorderBuffer[bestIdx]->pts;
 
-        bool iBetter = false;
-        if (pi >= 0 && pb < 0) {
-            iBetter = true;
-        } else if (pi >= 0 && pb >= 0) {
-            iBetter = pi < pb;
-        }  // else both invalid: keep bestIdx (smallest index = earliest decode order)
+                bool iBetter = false;
+                if (pi >= 0 && pb < 0) {
+                    iBetter = true;
+                } else if (pi >= 0 && pb >= 0) {
+                    iBetter = pi < pb;
+                }  // else both invalid: keep bestIdx (smallest index = earliest decode order)
 
-        if (iBetter) bestIdx = i;
+                if (iBetter) bestIdx = i;
+            }
+        }
     }
 
     AVFrame* selected = m->m_reorderBuffer[bestIdx];
     m->m_reorderBuffer.erase(m->m_reorderBuffer.begin() + bestIdx);
+    m->m_reorderAges.erase(m->m_reorderAges.begin() + bestIdx);
+
+    // Age the remaining frames: each non-selected frame records one pass-over.
+    // Used by the starvation guard on future ReadFrameGPU calls.
+    for (int& age : m->m_reorderAges) age++;
 
     // GPU device pointers from NVDEC surface — valid as long as the AVFrame ref lives.
     *outY = reinterpret_cast<const uint8_t*>(
@@ -293,6 +321,7 @@ void VideoDecoder::Close() {
         if (frame) av_frame_free(&frame);
     }
     m->m_reorderBuffer.clear();
+    m->m_reorderAges.clear();
     if (m->m_gpuOutputFrame) {
         av_frame_free(&m->m_gpuOutputFrame);
         m->m_gpuOutputFrame = nullptr;

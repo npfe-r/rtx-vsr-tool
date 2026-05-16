@@ -504,6 +504,17 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
+        // ---- Sync VSR output (default stream) → per-slot stream ----
+        // VSR/NGX runs on the default CUDA stream (stream 0) and writes
+        // d_rgba_dst asynchronously.  The rgba_to_nv12 kernel below runs
+        // on the per-slot non-blocking stream (cudaStreamNonBlocking).
+        // cudaStreamNonBlocking does NOT participate in default-stream
+        // implicit synchronisation, so without an explicit barrier the
+        // conversion kernel may read stale / partially-written data and
+        // produce corrupted output (old frame content leaking through).
+        cudaEventRecord(slot.decodeEvent, 0);          // VSR's default stream
+        cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);  // per-slot waits
+
         // Encode: try GPU zero-copy first, fall back to D2H + CPU encode
         {
             int64_t encPts = m_framesEncoded.load();
