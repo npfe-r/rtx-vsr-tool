@@ -7,7 +7,14 @@ std::wstring Config::GetIniPath() const {
     wchar_t path[MAX_PATH];
     GetModuleFileNameW(NULL, path, MAX_PATH);
     wchar_t* p = wcsrchr(path, L'.');
-    if (p) wcscpy(p, L".ini");
+    if (p) {
+        wcscpy(p, L".ini");
+    } else {
+        // No extension in exe path — append .ini
+        size_t len = wcslen(path);
+        if (len + 5 <= MAX_PATH)
+            wcscat_s(path, L".ini");
+    }
     return path;
 }
 

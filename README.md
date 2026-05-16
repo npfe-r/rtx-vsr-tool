@@ -5,18 +5,21 @@
 ## 功能
 
 - **AI 升频**：支持 2x、4x 或自定义输出分辨率
-- **质量等级**：Bicubic（不使用 VSR）/ Low / Medium / High / Ultra
-- **硬件编码**：NVENC H.264、HEVC、AV1
+- **质量等级**：Low / Medium / High / Ultra（Bicubic/passthrough 模式为内部保留，UI 中不暴露）
+- **硬件编码**：NVENC H.264、HEVC、AV1，支持 GPU 零拷贝编码路径
 - **软件编码**：libx264、libx265、libaom-av1、SVT-AV1
 - **TrueHDR**：SDR→HDR 色调映射，可调节对比度、饱和度、中间灰、最大亮度（需 10-bit 编码器 HEVC/AV1）
 - **HDR 输入**：自动检测 PQ（ST.2084）和 HLG 源，色调映射到 SDR 后再进行 VSR 处理
-- **音频处理**：AAC 转码（默认 128kbps）或直接复制（remux）源音频，也支持输出无音频
+- **音频处理**：AAC 转码（默认 128kbps，支持 64–320kbps）或直接复制（remux）源音频，也支持输出无音频
+- **NVDEC GPU 解码**：自动检测 CUDA NVDEC 可用性，不可用时弹出硬件解码回退警告供用户选择继续或取消
+- **启动前校验**：检查输入/输出路径合法性，文件存在性，NVDEC 回退等场景弹窗提醒
 - **多 GPU 支持**：可手动指定使用的 GPU 设备索引
-- **编码控制**：CRF 质量参数、速度预设、封装格式（mp4/mkv/mov）
+- **编码控制**：CRF 质量参数、速度预设、封装格式（mp4/mov）
 - **SEH 异常保护**：管线全流程和 NGX 调用均以结构化异常处理（SEH）保护，防止意外崩溃导致进程退出
 - **INI 配置持久化**：窗口位置、上次使用的路径、编码参数等设置自动保存/恢复
 - **拖放支持**：可直接将视频文件拖入窗口打开
 - **色彩元数据透传**：源视频的 color primaries/transfer/space/range 自动传递至编码器
+- **自动化 CLI**：支持 `-autostart` 参数直接启动管线（无需 GUI 交互）
 
 ## 硬件要求
 
@@ -62,7 +65,7 @@ Project Root/
 
 ### 快速构建（根级脚本）
 
-从仓库根目录运行，会自动定位 `RTX_VSR_CMake/` 子目录：
+从仓库根目录运行，会自动定位 `RTX_VSR_CMake/` 子目录。构建脚本自动检测 CMake 和 Visual Studio 2022 安装位置，无需手动配置：
 
 ```cmd
 build.bat [Debug|Release]
@@ -136,6 +139,14 @@ cmake --build build --config Release --target test_cuda_enc
 - 状态文本居中显示当前帧数和 FPS
 - 管线支持 **暂停** 与 **恢复**
 - 窗口自动调整大小以适配所有设置项，无需滚动
+
+### 自动化启动
+
+通过 `-autostart` 命令行参数启动时，工具会自动载入上次保存的输入/输出路径，跳过文件选择界面直接进入管线处理。适用于批量处理脚本或无人值守场景：
+
+```cmd
+RTX_VSR_Tool.exe -autostart
+```
 
 ## 架构
 

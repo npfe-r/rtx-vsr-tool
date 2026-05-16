@@ -16,6 +16,16 @@ extern "C" {
 
 #include "debug_util.h"
 
+// Map AVColorSpace to libswscale SWS_CS_* constant for sws_setColorspaceDetails.
+static int AvColorSpaceToSWS(int avCS) {
+    switch (avCS) {
+        case 5:  case 6:  return 0;          // SWS_CS_ITU601
+        case 1:           return 1;          // SWS_CS_ITU709
+        case 9:  case 10: return 9;          // SWS_CS_BT2020
+        default:          return 1;          // default BT.709
+    }
+}
+
 struct VideoEncoder::Impl {
     AVFormatContext* fmtCtx = nullptr;
     AVCodecContext*  encCtx  = nullptr;
@@ -350,18 +360,30 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     avcodec_parameters_from_context(m->videoStream->codecpar, m->encCtx);
     m->videoStream->time_base = m->encCtx->time_base;
 
-    // Initialize swscale for NV12/P010 → encoder pixel format (software encoders)
-    if (m->pixFmt == AV_PIX_FMT_YUV420P10LE) {
-        m->swsCtx = sws_getContext(
-            cfg.width, cfg.height, AV_PIX_FMT_P010LE,
-            cfg.width, cfg.height, AV_PIX_FMT_YUV420P10LE,
-            SWS_BILINEAR, NULL, NULL, NULL);
-        { char _b[256]; snprintf(_b, sizeof(_b), "sws: P010LE → YUV420P10LE (%dx%d)", cfg.width, cfg.height); LogMsg("ENC: ",_b); }
-    } else if (m->pixFmt == AV_PIX_FMT_YUV420P) {
-        m->swsCtx = sws_getContext(
-            cfg.width, cfg.height, AV_PIX_FMT_NV12,
-            cfg.width, cfg.height, AV_PIX_FMT_YUV420P,
-            SWS_BILINEAR, NULL, NULL, NULL);
+    // Initialize swscale for NV12/P010 → encoder pixel format (software encoders).
+    // Preserve the source colour matrix so the conversion yields correct pixel values.
+    {
+        int encColorspace = AvColorSpaceToSWS(cfg.colorSpace);
+        int encSrcRange = 0;  // pipeline output is always limited range
+        if (m->pixFmt == AV_PIX_FMT_YUV420P10LE) {
+            m->swsCtx = sws_getContext(
+                cfg.width, cfg.height, AV_PIX_FMT_P010LE,
+                cfg.width, cfg.height, AV_PIX_FMT_YUV420P10LE,
+                SWS_BILINEAR, NULL, NULL, NULL);
+            { char _b[256]; snprintf(_b, sizeof(_b), "sws: P010LE → YUV420P10LE (%dx%d) cs=%d",
+                cfg.width, cfg.height, encColorspace); LogMsg("ENC: ",_b); }
+        } else if (m->pixFmt == AV_PIX_FMT_YUV420P) {
+            m->swsCtx = sws_getContext(
+                cfg.width, cfg.height, AV_PIX_FMT_NV12,
+                cfg.width, cfg.height, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR, NULL, NULL, NULL);
+        }
+        if (m->swsCtx) {
+            sws_setColorspaceDetails(m->swsCtx,
+                sws_getCoefficients(encColorspace), encSrcRange,
+                sws_getCoefficients(encColorspace), 0,
+                0, 1 << 16, 1 << 16);
+        }
     }
 
     // Audio stream: copy source or transcode to AAC
@@ -617,10 +639,88 @@ void VideoEncoder::Close() {
     if (m->fmtCtx && m->fmtCtx->pb && m->audioStream && m->audioPackets) {
         if (m->audioTranscoding) {
             if (m->statusCb) m->statusCb("音频转码中...");
+
+            // Allocate audio frame buffers once (max possible size)
+            int maxSamples = 2048; // safe upper bound for AAC frame size
+            m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
+            m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
+            m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+            m->audioEncFrame->nb_samples  = maxSamples;
+            if (av_frame_get_buffer(m->audioEncFrame, 0) < 0) {
+                LogMsg("ENC: ","audio: failed to allocate encoder frame buffer");
+            }
+
+            // Lambda: decode one packet → resample → encode → write
+            auto processAudioPacket = [&](AVPacket* apkt) -> bool {
+                if (!apkt) return false;
+                if (avcodec_send_packet(m->audioDecCtx, apkt) < 0)
+                    return false;
+                while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
+                    int dstSamples = av_rescale_rnd(
+                        swr_get_delay(m->audioSwr, m->audioDecCtx->sample_rate) +
+                            m->audioFrame->nb_samples,
+                        m->audioEncCtx->sample_rate,
+                        m->audioDecCtx->sample_rate,
+                        AV_ROUND_UP);
+                    av_frame_make_writable(m->audioEncFrame);
+                    if (dstSamples > m->audioEncFrame->nb_samples) {
+                        // Grow buffer if needed (should not happen with 2048 initial)
+                        av_frame_unref(m->audioEncFrame);
+                        m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
+                        m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
+                        m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+                        m->audioEncFrame->nb_samples  = dstSamples;
+                        av_frame_get_buffer(m->audioEncFrame, 0);
+                    }
+                    m->audioEncFrame->nb_samples = dstSamples;
+                    swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
+                    avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
+                    AVPacket* opkt = av_packet_alloc();
+                    while (avcodec_receive_packet(m->audioEncCtx, opkt) >= 0) {
+                        opkt->stream_index = m->audioStream->index;
+                        av_interleaved_write_frame(m->fmtCtx, opkt);
+                        av_packet_unref(opkt);
+                    }
+                    av_packet_free(&opkt);
+                }
+                return true;
+            };
+
+            // Lambda: flush decoder (send NULL, drain remaining frames)
+            auto flushDecoder = [&]() {
+                avcodec_send_packet(m->audioDecCtx, NULL);
+                while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
+                    int dstSamples = av_rescale_rnd(
+                        swr_get_delay(m->audioSwr, m->audioDecCtx->sample_rate) +
+                            m->audioFrame->nb_samples,
+                        m->audioEncCtx->sample_rate,
+                        m->audioDecCtx->sample_rate,
+                        AV_ROUND_UP);
+                    av_frame_make_writable(m->audioEncFrame);
+                    if (dstSamples > m->audioEncFrame->nb_samples) {
+                        av_frame_unref(m->audioEncFrame);
+                        m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
+                        m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
+                        m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
+                        m->audioEncFrame->nb_samples  = dstSamples;
+                        av_frame_get_buffer(m->audioEncFrame, 0);
+                    }
+                    m->audioEncFrame->nb_samples = dstSamples;
+                    swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
+                    avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
+                    AVPacket* opkt = av_packet_alloc();
+                    while (avcodec_receive_packet(m->audioEncCtx, opkt) >= 0) {
+                        opkt->stream_index = m->audioStream->index;
+                        av_interleaved_write_frame(m->fmtCtx, opkt);
+                        av_packet_unref(opkt);
+                    }
+                    av_packet_free(&opkt);
+                }
+            };
+
+            // Process all source packets
             int totalPkts = (int)m->audioPackets->size();
-            int pktCount = 0;
-            AVPacket* pkt = av_packet_alloc();
-            int nextReportPct = 25;
+            int pktCount = 0, nextReportPct = 25;
             for (AVPacket* apkt : *m->audioPackets) {
                 if (!apkt) continue;
                 pktCount++;
@@ -631,60 +731,22 @@ void VideoEncoder::Close() {
                     m->statusCb(msg);
                     nextReportPct = pct + 25;
                 }
-                avcodec_send_packet(m->audioDecCtx, apkt);
-                while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
-                    int dstSamples = av_rescale_rnd(
-                        swr_get_delay(m->audioSwr, m->audioDecCtx->sample_rate) +
-                            m->audioFrame->nb_samples,
-                        m->audioEncCtx->sample_rate,
-                        m->audioDecCtx->sample_rate,
-                        AV_ROUND_UP);
-                    av_frame_unref(m->audioEncFrame);
-                    m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
-                    m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
-                    m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
-                    m->audioEncFrame->nb_samples  = dstSamples;
-                    av_frame_get_buffer(m->audioEncFrame, 0);
-                    swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
-                    avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
-                    while (avcodec_receive_packet(m->audioEncCtx, pkt) >= 0) {
-                        pkt->stream_index = m->audioStream->index;
-                        av_interleaved_write_frame(m->fmtCtx, pkt);
-                        av_packet_unref(pkt);
-                    }
-                }
+                processAudioPacket(apkt);
             }
 
-            avcodec_send_packet(m->audioDecCtx, NULL);
-            while (avcodec_receive_frame(m->audioDecCtx, m->audioFrame) >= 0) {
-                int dstSamples = av_rescale_rnd(
-                    swr_get_delay(m->audioSwr, m->audioDecCtx->sample_rate) +
-                        m->audioFrame->nb_samples,
-                    m->audioEncCtx->sample_rate,
-                    m->audioDecCtx->sample_rate,
-                    AV_ROUND_UP);
-                av_frame_unref(m->audioEncFrame);
-                m->audioEncFrame->format      = m->audioEncCtx->sample_fmt;
-                m->audioEncFrame->ch_layout   = m->audioEncCtx->ch_layout;
-                m->audioEncFrame->sample_rate = m->audioEncCtx->sample_rate;
-                m->audioEncFrame->nb_samples  = dstSamples;
-                av_frame_get_buffer(m->audioEncFrame, 0);
-                swr_convert_frame(m->audioSwr, m->audioEncFrame, m->audioFrame);
-                avcodec_send_frame(m->audioEncCtx, m->audioEncFrame);
-                while (avcodec_receive_packet(m->audioEncCtx, pkt) >= 0) {
-                    pkt->stream_index = m->audioStream->index;
-                    av_interleaved_write_frame(m->fmtCtx, pkt);
-                    av_packet_unref(pkt);
-                }
-            }
-
+            // Flush decoder, then encoder
+            flushDecoder();
             avcodec_send_frame(m->audioEncCtx, NULL);
-            while (avcodec_receive_packet(m->audioEncCtx, pkt) >= 0) {
-                pkt->stream_index = m->audioStream->index;
-                av_interleaved_write_frame(m->fmtCtx, pkt);
-                av_packet_unref(pkt);
+            AVPacket* fpkt = av_packet_alloc();
+            while (avcodec_receive_packet(m->audioEncCtx, fpkt) >= 0) {
+                fpkt->stream_index = m->audioStream->index;
+                av_interleaved_write_frame(m->fmtCtx, fpkt);
+                av_packet_unref(fpkt);
             }
-            av_packet_free(&pkt);
+            av_packet_free(&fpkt);
+
+            // Free the encoder frame buffer that we allocated once
+            if (m->audioEncFrame) av_frame_unref(m->audioEncFrame);
         } else {
             if (m->statusCb) m->statusCb("音频复制中...");
             for (AVPacket* apkt : *m->audioPackets) {

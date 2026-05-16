@@ -8,6 +8,11 @@
 
 #include "debug_util.h"
 
+// Slot wait timeout (ms) — how long the decode / GPU threads sleep between
+// pause-state re-checks when no slot is available.  Lower values improve
+// pause latency; higher values reduce CPU usage during idle loops.
+static const int SLOT_WAIT_MS = 200;
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
@@ -145,7 +150,7 @@ void PipelineController::DecodeFunc() {
 
         if (slotIdx < 0) {
             std::unique_lock<std::mutex> lk(m_slotMutex);
-            m_slotCv.wait_for(lk, std::chrono::milliseconds(200));
+            m_slotCv.wait_for(lk, std::chrono::milliseconds(SLOT_WAIT_MS));
             continue;
         }
 
@@ -495,7 +500,7 @@ void PipelineController::ThreadFuncImpl() {
         // display-ordered frame.
         {
             std::unique_lock<std::mutex> lk(m_slotMutex);
-            m_slotCv.wait_for(lk, std::chrono::milliseconds(200), [&] {
+            m_slotCv.wait_for(lk, std::chrono::milliseconds(SLOT_WAIT_MS), [&] {
                 for (int i = 0; i < NUM_SLOTS; i++)
                     if (m_slots[i].state.load() == SlotState::VSR_Ready) return true;
                 return m_decodeDone.load();

@@ -94,6 +94,9 @@ private:
 
     std::vector<std::string> m_gpuNames;
     bool m_autoSized = false;
+    bool m_gpuDecodeAvailable = true;     // set by OnSelectInput probe
+    bool m_nvdecProbed = false;           // true after NVDEC availability check
+    char m_fallbackMsg[256] = {};         // non-empty = fallback to warn about
 
     std::mutex m_progressMutex;
     std::chrono::steady_clock::time_point m_startTime;

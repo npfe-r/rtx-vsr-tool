@@ -11,7 +11,7 @@ extern "C" {
 
 #include <vector>
 
-// ── Helpers for colour-space mapping ───────────────────────────────
+#include "debug_util.h"
 
 // Map FFmpeg AVColorSpace to our simplified ColorMatrix enum.
 // Defaults to BT.709 (the most common for HD video) when unspecified.
@@ -182,9 +182,9 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
             }
         }
         if (m->useHW) {
-            OutputDebugStringA("DEC: CUDA hardware decoding enabled\n");
+            LogMsg("DEC: ","CUDA hardware decoding enabled");
         } else {
-            OutputDebugStringA("DEC: CUDA hardware decoding not available, falling back to software\n");
+            LogMsg("DEC: ","CUDA hardware decoding not available, falling back to software");
         }
     }
 
@@ -248,7 +248,7 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
             info->avColorPrimaries, info->avColorTransfer,
             info->avColorSpace, info->avColorRange,
             AvColorSpaceToMatrix(info->avColorSpace));
-        OutputDebugStringA(_b); OutputDebugStringA("\n");
+        LogMsg("DEC: ",_b);
     }
 
     return true;

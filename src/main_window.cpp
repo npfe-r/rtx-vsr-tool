@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cuda_runtime.h>
+#include "debug_util.h"
 
 static void widen(const char* utf8, wchar_t* wbuf, int wbufSize)
 {
@@ -115,11 +116,17 @@ void MainWindow::CleanupD3D11()
 void MainWindow::CreateRenderTarget()
 {
     ID3D11Texture2D* backBuffer = nullptr;
-    m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (backBuffer) {
-        m_d3dDevice->CreateRenderTargetView(backBuffer, nullptr, &m_rtv);
-        backBuffer->Release();
+    HRESULT hr = m_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    if (FAILED(hr) || !backBuffer) {
+        LogMsg("UI: ","CreateRenderTarget: GetBuffer failed");
+        return;
     }
+    hr = m_d3dDevice->CreateRenderTargetView(backBuffer, nullptr, &m_rtv);
+    if (FAILED(hr)) {
+        LogMsg("UI: ","CreateRenderTarget: CreateRenderTargetView failed");
+        m_rtv = nullptr;
+    }
+    backBuffer->Release();
 }
 
 void MainWindow::CleanupRenderTarget()
@@ -246,9 +253,12 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         if (m_d3dDevice && wParam != SIZE_MINIMIZED) {
             CleanupRenderTarget();
-            m_swapChain->ResizeBuffers(0,
+            HRESULT hr = m_swapChain->ResizeBuffers(0,
                 (UINT)LOWORD(lParam), (UINT)HIWORD(lParam),
                 DXGI_FORMAT_UNKNOWN, 0);
+            if (FAILED(hr)) {
+                LogMsg("UI: ","ResizeBuffers failed");
+            }
             CreateRenderTarget();
         }
         return 0;
@@ -285,12 +295,14 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 if (m_smoothedMs < 0.001f) {
                     m_smoothedMs = rawMs;
                 } else {
-                    const float alpha = 0.12f; // lower = smoother; 0.12 ~ 8-frame half-life
+                    const float alpha = 0.12f;
                     m_smoothedMs = alpha * rawMs + (1.0f - alpha) * m_smoothedMs;
                 }
                 int remaining = p->totalFrames - p->currentFrame;
                 m_displayFps = 1000.0f / m_smoothedMs;
                 m_displayEta = remaining * m_smoothedMs / 1000.0f;
+
+                std::lock_guard<std::mutex> lk(m_progressMutex);
                 m_currentFrame  = p->currentFrame;
                 m_totalFrames   = p->totalFrames;
             }
@@ -498,13 +510,16 @@ void MainWindow::RenderUI()
     const float midY = contentY + topBarH;
 
     // Calculate mid section height from settings panel content (no scrollbar)
+    // Count of control rows (each uses AlignTextToFramePadding + Text + SameLine + widget)
+    // Rows: GPU, Quality, HDR, OutputSize, Resolution, FPS, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 12
+    // Separators between groups: after HDR, after FPS, after Container = 3
     float midH;
     {
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        int nControls   = 12;
-        int nSeparators = 3;
+        const int nControls   = 12;  // update when adding/removing setting rows
+        const int nSeparators = 3;
         midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
     }
 
@@ -685,7 +700,7 @@ void MainWindow::RenderUI()
                              "NVENC 不支持 %dx%d (最大 8192x8192)，建议切换到软件编码器",
                              outW, outH);
             }
-            if (hadWarning && m_encoderWarning[0] == '\0')
+            if (hadWarning && m_encoderWarning[0] == '\0' && !m_isRunning)
                 m_statusText[0] = '\0';
         }
     } else {
@@ -729,7 +744,8 @@ void MainWindow::RenderUI()
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    // Quality
+    // Quality (Bicubic/qualityLevel=0 is intentionally excluded from the UI combo —
+    // reserved for internal/script use only. The combo maps 1→Low .. 4→Ultra.)
     ImGui::AlignTextToFramePadding();
     ImGui::Text("质量");
     ImGui::SameLine(labelW);
@@ -738,6 +754,7 @@ void MainWindow::RenderUI()
     static const char* qualityNames[] = { "低质量", "中等", "高质量", "极致" };
     int qualityIdx = m_qualityLevel - 1;
     if (qualityIdx < 0) qualityIdx = 0;
+    if (qualityIdx > 3) qualityIdx = 3;
     if (ImGui::Combo("##quality", &qualityIdx, qualityNames, 4)) {
         m_qualityLevel = qualityIdx + 1;
         m_config.Get().qualityLevel = m_qualityLevel;
@@ -1098,6 +1115,8 @@ void MainWindow::OnSelectInput()
     if (GetOpenFileNameW(&ofn)) {
         narrow(path, m_inputPath, sizeof(m_inputPath));
         wcscpy(m_config.Get().lastInputPath, path);
+        m_nvdecProbed = false;
+        m_fallbackMsg[0] = '\0';
 
         VideoDecoder decoder;
         if (decoder.Open(path, &m_videoInfo)) {
@@ -1108,12 +1127,35 @@ void MainWindow::OnSelectInput()
                      m_videoInfo.hasAudio ? "有音频" : "无音频");
             decoder.Close();
 
+            // Probe NVDEC GPU decode availability
+            VideoDecoder gpuProbe;
+            VideoInfo gpuInfo;
+            if (gpuProbe.Open(path, &gpuInfo, true)) {
+                bool hwAvail = gpuProbe.IsHWDecoding();
+                gpuProbe.Close();
+                m_gpuDecodeAvailable = hwAvail;
+                m_nvdecProbed = true;
+                if (!hwAvail) {
+                    snprintf(m_fallbackMsg, sizeof(m_fallbackMsg),
+                             "NVDEC 硬件解码不可用，将使用 CPU 软件解码。\n"
+                             "CPU 解码会占用大量内存带宽，处理速度可能显著降低。");
+                }
+            } else {
+                // GPU probe failed — maybe codec unsupported by NVDEC
+                m_gpuDecodeAvailable = false;
+                m_nvdecProbed = true;
+                snprintf(m_fallbackMsg, sizeof(m_fallbackMsg),
+                         "GPU 解码初始化失败，将使用 CPU 软件解码。\n"
+                         "处理速度可能显著降低。");
+            }
+
             if (m_videoInfo.fps > 0 && m_outputFps > (int)m_videoInfo.fps) {
                 m_outputFps = (int)m_videoInfo.fps;
                 m_config.Get().outputFps = m_outputFps;
             }
         } else {
             snprintf(m_inputInfo, sizeof(m_inputInfo), "无法打开文件");
+            snprintf(m_statusText, sizeof(m_statusText), "无法打开输入文件");
         }
 
         // Auto-generate output path
@@ -1190,6 +1232,42 @@ bool MainWindow::AutoStart()
 void MainWindow::OnStartStop()
 {
     if (!m_isRunning) {
+        // ---- Pre-start validation ----
+        if (!m_inputPath[0]) {
+            MessageBoxW(m_hWnd, L"请先选择输入视频文件。", L"输入未设置", MB_ICONWARNING);
+            return;
+        }
+        if (!m_outputPath[0]) {
+            MessageBoxW(m_hWnd, L"请先设置输出文件路径。", L"输出未设置", MB_ICONWARNING);
+            return;
+        }
+        // Check input file exists
+        {
+            wchar_t wpath[MAX_PATH];
+            widen(m_inputPath, wpath, MAX_PATH);
+            if (GetFileAttributesW(wpath) == INVALID_FILE_ATTRIBUTES) {
+                wchar_t msg[MAX_PATH + 64];
+                swprintf(msg, L"输入文件不存在:\n%s\n\n请重新选择文件。", wpath);
+                MessageBoxW(m_hWnd, msg, L"文件未找到", MB_ICONERROR);
+                return;
+            }
+        }
+
+        // Fallback warning: NVDEC unavailable
+        if (m_nvdecProbed && !m_gpuDecodeAvailable && m_fallbackMsg[0]) {
+            int ret = MessageBoxW(m_hWnd,
+                L"NVDEC 硬件解码不可用，将回退到 CPU 软件解码。\n\n"
+                L"CPU 解码会占用大量内存带宽，处理速度可能显著降低。\n"
+                L"对于高分辨率或高码率视频可能导致无法实时处理。\n\n"
+                L"是否继续？",
+                L"硬件解码回退警告",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (ret != IDYES) {
+                snprintf(m_statusText, sizeof(m_statusText), "用户取消");
+                return;
+            }
+        }
+
         VSRConfig& cfg = m_config.Get();
 
         PipelineConfig pc;
