@@ -322,6 +322,11 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    // --- Auto-start (posted from AutoStart()) ---
+    case WM_USER + 10:
+        if (!m_isRunning) OnStartStop();
+        return 0;
+
     // --- Pipeline completed (posted from worker thread) ---
     case WM_USER + 3: {
         auto elapsed = std::chrono::steady_clock::now() - m_startTime;
@@ -1027,6 +1032,13 @@ void MainWindow::OnSelectOutput()
 // ============================================================================
 // Start / Stop
 // ============================================================================
+
+bool MainWindow::AutoStart()
+{
+    if (m_isRunning) return false;
+    PostMessageW(m_hWnd, WM_USER + 10, 0, 0);
+    return true;
+}
 
 void MainWindow::OnStartStop()
 {

@@ -24,6 +24,9 @@ set(NGX_CORE_LIB "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.cu)
 
+# Exclude test sources from the main target
+list(FILTER SOURCES EXCLUDE REGEX "test_cuda_enc\\.cpp$")
+
 add_executable(RTX_VSR_Tool WIN32 ${SOURCES})
 
 target_include_directories(RTX_VSR_Tool PRIVATE
@@ -58,6 +61,14 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
     shell32
     comctl32
     advapi32
+)
+
+# CUDA hwcontext + NVENC zero-copy test (standalone, no GUI, no NGX dependency)
+add_executable(test_cuda_enc src/test_cuda_enc.cpp)
+target_link_libraries(test_cuda_enc PRIVATE
+    FFmpeg::avcodec
+    FFmpeg::avformat
+    FFmpeg::avutil
 )
 
 # Copy SDK DLLs to output dir

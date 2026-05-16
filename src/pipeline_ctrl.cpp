@@ -504,24 +504,56 @@ void PipelineController::ThreadFuncImpl() {
             break;
         }
 
-        // RGBA->NV12 + D2H on per-slot stream
-        launch_rgba_to_nv12(
-            slot.d_rgba_dst, m_dstW * 4,
-            slot.d_nv12_out, m_dstW,
-            slot.d_nv12_out + m_dstW * m_dstH, m_dstW,
-            m_dstW, m_dstH, slot.stream);
-        cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, nv12OutSize,
-                        cudaMemcpyDeviceToHost, slot.stream);
-        cudaStreamSynchronize(slot.stream);
-        if (CudaFailed("GPU: RGBA->NV12 + D2H")) {
-            LogDbg("GPU: CUDA error in RGBA->NV12 or D2H");
-            m_state.store(PipelineState::Error);
-            break;
-        }
-
-        // Encode with sequential PTS for uniform output timing.
+        // Encode: try GPU zero-copy first, fall back to D2H + CPU encode
         {
             int64_t encPts = m_framesEncoded.load();
+
+            // Try NVENC zero-copy: get CUDA hwframe buffer, render directly into it
+            uint8_t* encY = nullptr;
+            uint8_t* encUV = nullptr;
+            int encYPitch = 0, encUVPitch = 0;
+            if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
+                // GPU zero-copy path: rgba_to_nv12 → encoder's CUDA hwframe buffer
+                launch_rgba_to_nv12(
+                    slot.d_rgba_dst, m_dstW * 4,
+                    encY, encYPitch,
+                    encUV, encUVPitch,
+                    m_dstW, m_dstH, slot.stream);
+                cudaStreamSynchronize(slot.stream);
+                if (CudaFailed("GPU: RGBA->NV12 (CUDA enc)")) {
+                    LogDbg("GPU: CUDA error in RGBA->NV12 (CUDA enc)");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                if (!m_encoder.SubmitFrame(encPts)) {
+                    LogDbg("Encode failed (CUDA)");
+                    if (onError) onError(L"编码失败 (CUDA)");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+            } else {
+                // CPU fallback: render to d_nv12_out, D2H, CPU encode
+                launch_rgba_to_nv12(
+                    slot.d_rgba_dst, m_dstW * 4,
+                    slot.d_nv12_out, m_dstW,
+                    slot.d_nv12_out + m_dstW * m_dstH, m_dstW,
+                    m_dstW, m_dstH, slot.stream);
+                cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, nv12OutSize,
+                                cudaMemcpyDeviceToHost, slot.stream);
+                cudaStreamSynchronize(slot.stream);
+                if (CudaFailed("GPU: RGBA->NV12 + D2H")) {
+                    LogDbg("GPU: CUDA error in RGBA->NV12 or D2H");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, encPts)) {
+                    LogDbg("Encode failed");
+                    if (onError) onError(L"编码失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+            }
+
             if (encPts % 500 == 0) {
                 char buf[256];
                 snprintf(buf, sizeof(buf),
@@ -530,12 +562,6 @@ void PipelineController::ThreadFuncImpl() {
                     (long long)slot.pts, slot.seq.load(),
                     (int)slot.state.load());
                 LogDbg(buf);
-            }
-            if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, encPts)) {
-                LogDbg("Encode failed");
-                if (onError) onError(L"编码失败");
-                m_state.store(PipelineState::Error);
-                break;
             }
         }
 

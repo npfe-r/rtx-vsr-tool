@@ -25,6 +25,9 @@ public:
     void Render();
     HWND Handle() const { return m_hWnd; }
 
+    // Start pipeline from current config (used with -autostart command-line arg)
+    bool AutoStart();
+
 private:
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT OnMessage(UINT msg, WPARAM wParam, LPARAM lParam);

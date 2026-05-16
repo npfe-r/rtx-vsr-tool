@@ -5,6 +5,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/avassert.h>
+#include <libavutil/hwcontext.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -58,6 +59,12 @@ struct VideoEncoder::Impl {
     bool            audioTranscoding = false;
 
     SwsContext*     swsCtx = nullptr;
+
+    // CUDA hwcontext for NVENC zero-copy GPU encoding
+    AVBufferRef*     hwDeviceCtx = nullptr;
+    AVBufferRef*     hwFramesCtx = nullptr;
+    AVFrame*         cudaFrame   = nullptr;
+    bool             useCUDA     = false;
 };
 
 static const char* GetEncoderName(int id) {
@@ -195,6 +202,42 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         // crash when the pipeline reuses m->frame for every call (notably
         // with AV1 NVENC around frame 22).
         av_opt_set_int(m->encCtx->priv_data, "rc-lookahead", 0, 0);
+
+        // CUDA hwcontext for NVENC zero-copy GPU encoding.
+        // Creates a CUDA device context + hwframe pool so the encoder can accept
+        // AV_PIX_FMT_CUDA frames with device pointers directly — no D2H + memcpy.
+        {
+            AVBufferRef* hwDev = nullptr;
+            if (av_hwdevice_ctx_create(&hwDev, AV_HWDEVICE_TYPE_CUDA,
+                                       nullptr, nullptr, 0) >= 0) {
+                m->hwDeviceCtx = hwDev;
+
+                AVBufferRef* hwfc_ref = av_hwframe_ctx_alloc(m->hwDeviceCtx);
+                AVHWFramesContext* hwfc = (AVHWFramesContext*)hwfc_ref->data;
+                hwfc->format    = AV_PIX_FMT_CUDA;
+                hwfc->sw_format = AV_PIX_FMT_NV12;
+                hwfc->width     = cfg.width;
+                hwfc->height    = cfg.height;
+                hwfc->initial_pool_size = 4;
+                if (av_hwframe_ctx_init(hwfc_ref) >= 0) {
+                    m->hwFramesCtx = hwfc_ref;
+                    m->cudaFrame = av_frame_alloc();
+                    m->encCtx->pix_fmt = AV_PIX_FMT_CUDA;
+                    m->pixFmt = AV_PIX_FMT_CUDA;
+                    m->useCUDA = true;
+                    m->encCtx->hw_device_ctx = av_buffer_ref(m->hwDeviceCtx);
+                    m->encCtx->hw_frames_ctx = av_buffer_ref(m->hwFramesCtx);
+                    if (statusCb)
+                        statusCb("编码器: CUDA 零拷贝编码已启用");
+                } else {
+                    EncLog("av_hwframe_ctx_init failed for CUDA hwframe pool");
+                    av_buffer_unref(&m->hwDeviceCtx);
+                    m->hwDeviceCtx = nullptr;
+                }
+            } else {
+                EncLog("av_hwdevice_ctx_create failed for CUDA");
+            }
+        }
     } else {
         char crfStr[8];
         snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
@@ -334,14 +377,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
     avformat_write_header(m->fmtCtx, NULL);
 
-    // Allocate frame for encoding
-    m->frame = av_frame_alloc();
-    m->frame->width  = cfg.width;
-    m->frame->height = cfg.height;
-    m->frame->format = m->pixFmt;
-    if (av_frame_get_buffer(m->frame, 0) < 0) {
-        EncLog("av_frame_get_buffer failed");
-        return false;
+    // Allocate CPU encoding frame (CUDA path uses m->cudaFrame from hwframe pool instead)
+    if (!m->useCUDA) {
+        m->frame = av_frame_alloc();
+        m->frame->width  = cfg.width;
+        m->frame->height = cfg.height;
+        m->frame->format = m->pixFmt;
+        if (av_frame_get_buffer(m->frame, 0) < 0) {
+            EncLog("av_frame_get_buffer failed");
+            return false;
+        }
     }
 
     return true;
@@ -411,11 +456,73 @@ bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride
     return true;
 }
 
-bool VideoEncoder::GetFrameBuffer(uint8_t**, int*, uint8_t**, int*) {
-    return false;
+bool VideoEncoder::GetFrameBuffer(uint8_t** y, int* yPitch, uint8_t** uv, int* uvPitch) {
+    if (!m->useCUDA || !m->hwFramesCtx || !m->cudaFrame) return false;
+
+    if (m->cudaFrame->buf[0])
+        av_frame_unref(m->cudaFrame);
+
+    // av_hwframe_get_buffer internally sets frame->hw_frames_ctx
+    if (av_hwframe_get_buffer(m->hwFramesCtx, m->cudaFrame, 0) < 0) {
+        EncLog("GetFrameBuffer: av_hwframe_get_buffer failed");
+        return false;
+    }
+
+    *y       = (uint8_t*)m->cudaFrame->data[0];
+    *yPitch  = m->cudaFrame->linesize[0];
+    *uv      = (uint8_t*)m->cudaFrame->data[1];
+    *uvPitch = m->cudaFrame->linesize[1];
+
+    return true;
 }
 
-bool VideoEncoder::SubmitFrame() {
+bool VideoEncoder::SubmitFrame(int64_t pts) {
+    if (!m->useCUDA || !m->cudaFrame || !m->cudaFrame->buf[0]) return false;
+
+    m->cudaFrame->pts = pts;
+
+    __try {
+        int ret = avcodec_send_frame(m->encCtx, m->cudaFrame);
+        if (ret < 0) {
+            char _e[256]; av_strerror(ret, _e, sizeof(_e));
+            char _b[256]; snprintf(_b, sizeof(_b), "SubmitFrame: avcodec_send_frame failed: %s", _e); EncLog(_b);
+            m->encCtxFailed = true;
+            av_frame_unref(m->cudaFrame);
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        EncLog("SEH in avcodec_send_frame (CUDA)");
+        m->encCtxFailed = true;
+        av_frame_unref(m->cudaFrame);
+        return false;
+    }
+
+    AVPacket pkt = { 0 };
+    while (true) {
+        int ret;
+        __try {
+            ret = avcodec_receive_packet(m->encCtx, &pkt);
+            if (ret < 0) break;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in avcodec_receive_packet (CUDA)");
+            m->encCtxFailed = true;
+            av_packet_unref(&pkt);
+            return false;
+        }
+        __try {
+            av_packet_rescale_ts(&pkt, m->encCtx->time_base, m->videoStream->time_base);
+            pkt.stream_index = m->videoStream->index;
+            av_interleaved_write_frame(m->fmtCtx, &pkt);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            EncLog("SEH in av_interleaved_write_frame (CUDA)");
+            m->encCtxFailed = true;
+            av_packet_unref(&pkt);
+            return false;
+        }
+        av_packet_unref(&pkt);
+    }
+
+    av_frame_unref(m->cudaFrame);
     return true;
 }
 
@@ -519,6 +626,12 @@ void VideoEncoder::Close() {
     if (m->audioEncFrame) { av_frame_free(&m->audioEncFrame); m->audioEncFrame = nullptr; }
     if (m->audioSwr)      { swr_free(&m->audioSwr); m->audioSwr = nullptr; }
     if (m->swsCtx)        { sws_freeContext(m->swsCtx); m->swsCtx = nullptr; }
+
+    // Cleanup CUDA hwcontext (NVENC zero-copy)
+    if (m->cudaFrame)         { av_frame_free(&m->cudaFrame); m->cudaFrame = nullptr; }
+    if (m->hwFramesCtx)       { av_buffer_unref(&m->hwFramesCtx); m->hwFramesCtx = nullptr; }
+    if (m->hwDeviceCtx)       { av_buffer_unref(&m->hwDeviceCtx); m->hwDeviceCtx = nullptr; }
+    m->useCUDA = false;
 
     m->frameCount = 0;
     m->encCtxFailed = false;

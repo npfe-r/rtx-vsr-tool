@@ -84,6 +84,20 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     DebugOut("MainWindow created, entering message loop");
 
+    // -autostart: kick off pipeline immediately (headless-friendly)
+    {
+        int ac = 0;
+        LPWSTR* aw = CommandLineToArgvW(GetCommandLineW(), &ac);
+        for (int i = 1; i < ac; i++) {
+            if (wcscmp(aw[i], L"-autostart") == 0) {
+                DebugOut("autostart triggered");
+                window.AutoStart();
+                break;
+            }
+        }
+        LocalFree(aw);
+    }
+
     RunMessageLoop(window);
 
     DebugOut("RTX VSR Tool exiting normally");
