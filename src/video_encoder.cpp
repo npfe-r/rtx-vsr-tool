@@ -246,10 +246,8 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 
         if (strcmp(encName, "libx264") == 0) {
             av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
-            av_opt_set_int(m->encCtx->priv_data, "bf", 0, 0);
         } else if (strcmp(encName, "libx265") == 0) {
             av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
-            av_opt_set_int(m->encCtx->priv_data, "bframes", 0, 0);
         } else if (strcmp(encName, "libaom-av1") == 0) {
             // libaom maps avctx->thread_count directly to its internal
             // g_threads (tile thread pool).  Default is 1 from

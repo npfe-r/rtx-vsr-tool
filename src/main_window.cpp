@@ -932,6 +932,14 @@ void MainWindow::RenderUI()
         ImGui::Separator();
         ImGui::Text("%s", m_completeStats);
         ImGui::Spacing();
+        if (ImGui::Button("打开输出文件夹", ImVec2(160, 0))) {
+            wchar_t outPathW[512];
+            widen(m_outputPath, outPathW, 512);
+            // Construct explorer.exe /select,"path" to open folder and select the file
+            wchar_t cmd[1024];
+            swprintf_s(cmd, L"/select,\"%s\"", outPathW);
+            ShellExecuteW(nullptr, L"open", L"explorer.exe", cmd, nullptr, SW_SHOW);
+        }
         if (ImGui::Button("确定", ImVec2(120, 0)))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
