@@ -503,7 +503,7 @@ void MainWindow::RenderUI()
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        int nControls   = 11;
+        int nControls   = 12;
         int nSeparators = 3;
         midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
     }
@@ -626,11 +626,21 @@ void MainWindow::RenderUI()
         else
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
 
-        // Encoder resolution compatibility check — update warning for bottom bar
+        if (m_trueHdrEnabled) {
+            ImGui::Text("HDR");
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.4f, 1), "TrueHDR 10-bit BT.2020 PQ");
+        }
+
+        // Encoder compatibility check — update warning for bottom bar
         {
             bool hadWarning = m_encoderWarning[0] != '\0';
             m_encoderWarning[0] = '\0';
-            if (m_encoderIndex == 0) {
+            // TrueHDR + unsupported encoder warning
+            if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3)) {
+                snprintf(m_encoderWarning, sizeof(m_encoderWarning),
+                         "TrueHDR 需要 10-bit 编码器，当前编码器不支持，建议切换到 HEVC 或 AV1");
+            } else if (m_encoderIndex == 0) {
                 if (outW > 4096 || outH > 4096)
                     snprintf(m_encoderWarning, sizeof(m_encoderWarning),
                              "H.264 NVENC 不支持 %dx%d (最大 4096x4096)，建议切换到 HEVC 或 AV1",
@@ -697,6 +707,26 @@ void MainWindow::RenderUI()
     if (ImGui::Combo("##quality", &qualityIdx, qualityNames, 4)) {
         m_qualityLevel = qualityIdx + 1;
         m_config.Get().qualityLevel = m_qualityLevel;
+    }
+    if (m_isRunning) ImGui::EndDisabled();
+    ImGui::PopItemWidth();
+
+    // TrueHDR toggle
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("HDR");
+    ImGui::SameLine(labelW);
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+    if (m_isRunning) ImGui::BeginDisabled();
+    {
+        bool hdrOn = (m_trueHdrEnabled != 0);
+        if (ImGui::Checkbox("##truehdr", &hdrOn)) {
+            m_trueHdrEnabled = hdrOn ? 1 : 0;
+            // Auto-switch to HEVC NVENC if current encoder doesn't support 10-bit
+            if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3))
+                m_encoderIndex = 1;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "TrueHDR (HDR 色调映射)");
     }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
@@ -1100,6 +1130,7 @@ void MainWindow::OnStartStop()
         pc.audioMode = m_audioMode;
         pc.audioBitrate = m_audioBitrate;
         pc.outputFps    = m_outputFps;
+        pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
 
         cfg.qualityLevel = m_qualityLevel;
         cfg.outputMode   = m_outputMode;
@@ -1226,6 +1257,7 @@ void MainWindow::LoadConfigToUI()
     m_audioMode    = cfg.audioMode;
     m_audioBitrate    = cfg.audioBitrate;
     m_outputFps       = cfg.outputFps;
+    m_trueHdrEnabled  = cfg.trueHdrEnabled;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -1247,4 +1279,5 @@ void MainWindow::SaveUIToConfig()
     cfg.audioMode    = m_audioMode;
     cfg.audioBitrate    = m_audioBitrate;
     cfg.outputFps       = m_outputFps;
+    cfg.trueHdrEnabled  = m_trueHdrEnabled;
 }

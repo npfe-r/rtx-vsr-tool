@@ -34,6 +34,7 @@ void Config::Load() {
     m_config.outputFps    = r(L"Params", L"OutputFps", 0);
     m_config.audioMode = r(L"Params", L"AudioMode", 1);
     m_config.audioBitrate = r(L"Params", L"AudioBitrate", 128);
+    m_config.trueHdrEnabled = r(L"Params", L"TrueHdr", 0);
 
     rs(L"Paths", L"Input",  m_config.lastInputPath,  L"");
     rs(L"Paths", L"Output", m_config.lastOutputPath, L"");
@@ -59,6 +60,7 @@ void Config::Save() {
     w(L"Params", L"OutputFps", m_config.outputFps);
     w(L"Params", L"AudioMode", m_config.audioMode);
     w(L"Params", L"AudioBitrate", m_config.audioBitrate);
+    w(L"Params", L"TrueHdr", m_config.trueHdrEnabled);
 
     WritePrivateProfileStringW(L"Paths", L"Input",  m_config.lastInputPath,  path.c_str());
     WritePrivateProfileStringW(L"Paths", L"Output", m_config.lastOutputPath, path.c_str());

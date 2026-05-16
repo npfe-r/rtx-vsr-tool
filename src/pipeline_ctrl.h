@@ -28,6 +28,12 @@ extern "C" void launch_rgba_to_nv12(
     uint8_t* uv_plane, int uv_pitch,
     int w, int h, cudaStream_t stream, int colorMatrix);
 
+extern "C" void launch_abgr10_to_p010(
+    const uint8_t* abgr10, int abgr10_pitch,
+    uint8_t* y_plane, int y_pitch,
+    uint8_t* uv_plane, int uv_pitch,
+    int w, int h, cudaStream_t stream);
+
 struct PipelineConfig {
     std::wstring inputPath;
     std::wstring outputPath;
@@ -43,6 +49,7 @@ struct PipelineConfig {
     int outputFps = 0;
     int audioMode = 1;
     int audioBitrate = 128;
+    bool trueHdrEnabled = false;
 };
 
 struct PipelineProgress {
@@ -140,4 +147,7 @@ private:
     int m_avColorTransfer   = 2;               // AVCOL_TRC_BT709
     int m_avColorSpace      = 1;               // AVCOL_SPC_BT709
     int m_avColorRange      = 0;               // AVCOL_RANGE_UNSPECIFIED
+
+    // TrueHDR mode (10-bit P010 output, HDR10 metadata)
+    bool m_trueHdrEnabled = false;
 };

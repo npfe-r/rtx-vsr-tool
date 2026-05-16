@@ -12,6 +12,7 @@
 struct VSRProcessor::Impl {
     CUdevice   cuDevice  = 0;
     CUcontext  cuContext = nullptr;
+    bool       trueHdrEnabled = false;
 };
 
 // NGX is initialised at most once per process lifetime.
@@ -27,7 +28,7 @@ static int  s_ngxGpuIndex    = -1;
 VSRProcessor::VSRProcessor() : m(new Impl) {}
 VSRProcessor::~VSRProcessor() { Shutdown(); delete m; }
 
-bool VSRProcessor::Initialize(int gpuIndex) {
+bool VSRProcessor::Initialize(int gpuIndex, bool enableTrueHdr) {
     Shutdown();
 
     char buf[256];
@@ -59,7 +60,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
             m->cuContext,           // CUDA context
             nullptr,                // CUDA stream (null = default)
             gpuIndex,               // GPU index
-            API_BOOL_FAIL,          // TrueHDR disabled
+            enableTrueHdr ? API_BOOL_SUCCESS : API_BOOL_FAIL,  // TrueHDR
             API_BOOL_SUCCESS        // VSR enabled
         );
 
@@ -86,7 +87,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
         cuCtxPushCurrent(m->cuContext);
         API_BOOL ok = rtx_video_api_cuda_create(
             m->cuContext, nullptr, gpuIndex,
-            API_BOOL_FAIL, API_BOOL_SUCCESS);
+            enableTrueHdr ? API_BOOL_SUCCESS : API_BOOL_FAIL, API_BOOL_SUCCESS);
         cuCtxPopCurrent(&current);
 
         if (ok != API_BOOL_SUCCESS) {
@@ -105,6 +106,7 @@ bool VSRProcessor::Initialize(int gpuIndex) {
     // internal CUDA arrays lazily if frame dimensions changed, so no
     // re-creation of the VSR feature is needed here.
 
+    m->trueHdrEnabled = enableTrueHdr;
     m_initialized = true;
     LogMsg("VSR: ","VSR: initialized successfully");
     return true;
@@ -124,13 +126,25 @@ bool VSRProcessor::ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
     API_VSR_Setting vsrSetting;
     vsrSetting.QualityLevel = (int)quality;
 
+    // Pass THDR settings when TrueHDR is enabled — nullptr would skip
+    // the HDR tone-mapping per-frame even if the create flag enabled it.
+    API_THDR_Setting thdrSetting;
+    API_THDR_Setting* pThdrSetting = nullptr;
+    if (m->trueHdrEnabled) {
+        thdrSetting.Contrast    = 100;  // SDK default (range 0–200)
+        thdrSetting.Saturation  = 100;  // SDK default (range 0–200)
+        thdrSetting.MiddleGray  = 50;   // SDK default (range 10–100)
+        thdrSetting.MaxLuminance = 1000; // reasonable HDR display peak (range 400–2000)
+        pThdrSetting = &thdrSetting;
+    }
+
     bool ok = rtx_video_api_cuda_evaluate_deviceptr(
         const_cast<void*>(srcDevicePtr),
         dstDevicePtr,
         inputRect,
         outputRect,
         &vsrSetting,
-        nullptr  // no TrueHDR settings
+        pThdrSetting
     );
 
     cuCtxPopCurrent(&current);

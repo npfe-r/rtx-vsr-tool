@@ -32,6 +32,9 @@ struct EncodeConfig {
     int colorTransfer  = 0;  // 0 → AVCOL_TRC_BT709  (2)
     int colorSpace     = 0;  // 0 → AVCOL_SPC_BT709  (1)
     int colorRange     = 0;  // 0 → AVCOL_RANGE_UNSPECIFIED  (0 → encoder = MPEG)
+
+    // 10-bit / HDR mode (P010 output, TrueHDR)
+    bool use10Bit = false;
 };
 
 using OnEncoderStatus = std::function<void(const char*)>;

@@ -114,6 +114,65 @@ __global__ void rgba_to_nv12_kernel(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// ABGR10 (TrueHDR output) → P010  (BT.2020 10-bit limited range)
+// ────────────────────────────────────────────────────────────────────
+// Input:  32-bit ABGR10 packed pixel (A[31:30] B[29:20] G[19:10] R[9:0])
+// Output: P010 — uint16_t Y  (w×h),  uint16_t UV interleaved (w×h/2)
+// Coefficients are BT.2020 10-bit limited range:
+//   Y  = (( 29*R +  74*G +   7*B + 64) >> 7) + 64
+//   Cb = ((-16*R -  40*G +  56*B + 64) >> 7) + 512
+//   Cr = (( 56*R -  52*G -   5*B + 64) >> 7) + 512
+// ────────────────────────────────────────────────────────────────────
+__global__ void abgr10_to_p010_kernel(
+    const uint8_t* abgr10, int abgr10_pitch,
+    uint8_t* y_plane, int y_pitch,
+    uint8_t* uv_plane, int uv_pitch,
+    int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+
+    const uint32_t* src = (const uint32_t*)abgr10;
+    uint32_t pixel = src[y * (abgr10_pitch / 4) + x];
+
+    int R = (int)(pixel & 0x3FF);
+    int G = (int)((pixel >> 10) & 0x3FF);
+    int B = (int)((pixel >> 20) & 0x3FF);
+
+    // Y — every pixel
+    int Y_val = ((29 * R + 74 * G + 7 * B + 64) >> 7) + 64;
+    uint16_t* y16 = (uint16_t*)y_plane;
+    y16[y * (y_pitch / 2) + x] = (uint16_t)(clamp(Y_val, 0, 1023) << 6);
+
+    // UV — each 2×2 block once (top-left thread)
+    if ((x & 1) == 0 && (y & 1) == 0) {
+        int sumR = 0, sumG = 0, sumB = 0;
+        for (int dy = 0; dy < 2; dy++) {
+            for (int dx = 0; dx < 2; dx++) {
+                int px = x + dx;
+                int py = y + dy;
+                if (px >= w || py >= h) continue;
+                uint32_t p = src[py * (abgr10_pitch / 4) + px];
+                sumR += (int)(p & 0x3FF);
+                sumG += (int)((p >> 10) & 0x3FF);
+                sumB += (int)((p >> 20) & 0x3FF);
+            }
+        }
+        int avgR = sumR / 4;
+        int avgG = sumG / 4;
+        int avgB = sumB / 4;
+        int U_val = ((-16 * avgR - 40 * avgG + 56 * avgB + 64) >> 7) + 512;
+        int V_val = (( 56 * avgR - 52 * avgG -  5 * avgB + 64) >> 7) + 512;
+
+        uint16_t* uv16 = (uint16_t*)uv_plane;
+        int uvRow = y / 2;
+        uv16[uvRow * (uv_pitch / 2) + x]     = (uint16_t)(clamp(U_val, 0, 1023) << 6);
+        uv16[uvRow * (uv_pitch / 2) + x + 1] = (uint16_t)(clamp(V_val, 0, 1023) << 6);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Host-callable wrappers
 // ────────────────────────────────────────────────────────────────────
 
@@ -142,4 +201,18 @@ extern "C" void launch_rgba_to_nv12(
         rgba, rgba_pitch,
         y_plane, y_pitch, uv_plane, uv_pitch,
         w, h, colorMatrix);
+}
+
+extern "C" void launch_abgr10_to_p010(
+    const uint8_t* abgr10, int abgr10_pitch,
+    uint8_t* y_plane, int y_pitch,
+    uint8_t* uv_plane, int uv_pitch,
+    int w, int h, cudaStream_t stream)
+{
+    dim3 block(16, 16);
+    dim3 grid((w + 15) / 16, (h + 15) / 16);
+    abgr10_to_p010_kernel<<<grid, block, 0, stream>>>(
+        abgr10, abgr10_pitch,
+        y_plane, y_pitch, uv_plane, uv_pitch,
+        w, h);
 }

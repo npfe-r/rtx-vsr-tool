@@ -14,7 +14,7 @@ public:
     VSRProcessor();
     ~VSRProcessor();
 
-    bool Initialize(int gpuIndex);
+    bool Initialize(int gpuIndex, bool enableTrueHdr = false);
     bool ProcessFrame(const void* srcDevicePtr, void* dstDevicePtr,
                       int srcW, int srcH, int dstW, int dstH,
                       VSRQuality quality);

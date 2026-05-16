@@ -74,6 +74,7 @@ private:
     int     m_audioMode        = 1;
     int     m_audioBitrate     = 128;
     int     m_outputFps        = 0;
+    int     m_trueHdrEnabled   = 0;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]    = {};
     char    m_encoderWarning[256] = {};

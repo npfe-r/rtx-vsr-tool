@@ -35,11 +35,11 @@ struct VSRFrameContext {
     VSRQuality quality;
 };
 
-static bool SafeVSRInit(VSRProcessor* vsr, int gpuIndex)
+static bool SafeVSRInit(VSRProcessor* vsr, int gpuIndex, bool enableTrueHdr)
 {
     LogMsg("PIP: ","  -> calling vsr->Initialize()...");
     __try {
-        bool ok = vsr->Initialize(gpuIndex);
+        bool ok = vsr->Initialize(gpuIndex, enableTrueHdr);
         LogMsg("PIP: ","  -> vsr->Initialize() returned");
         return ok;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -285,6 +285,9 @@ void PipelineController::ThreadFuncImpl() {
     m_srcTimeBaseNum = info.srcTimeBaseNum;
     m_srcTimeBaseDen = info.srcTimeBaseDen;
 
+    // Store pipeline flags
+    m_trueHdrEnabled = m_cfg.trueHdrEnabled;
+
     // Store source colour metadata
     m_colorMatrix       = info.srcColorMatrix;
     m_avColorPrimaries  = info.avColorPrimaries;
@@ -319,12 +322,15 @@ void PipelineController::ThreadFuncImpl() {
     // ---- Allocate frame slots (pinned CPU memory + GPU + per-slot streams) ----
     LogStatus(onStatus, "分配帧缓冲区...");
     size_t nv12Size     = (size_t)m_srcW * m_srcH * 3 / 2;
-    size_t nv12OutSize  = (size_t)m_dstW * m_dstH * 3 / 2;
+    // P010 output is w*h*4 bytes vs NV12's w*h*3/2 (10-bit uses 16-bit per sample)
+    size_t outSize      = m_trueHdrEnabled
+        ? (size_t)m_dstW * m_dstH * 3
+        : (size_t)m_dstW * m_dstH * 3 / 2;
     size_t rgbaSrcSize  = (size_t)m_srcW * m_srcH * 4;
     size_t rgbaDstSize  = (size_t)m_dstW * m_dstH * 4;
 
-    { char buf[256]; snprintf(buf, sizeof(buf), "src=%dx%d dst=%dx%d nv12=%zu rgba=%zu",
-        m_srcW, m_srcH, m_dstW, m_dstH, nv12Size, rgbaSrcSize); LogMsg("PIP: ",buf); }
+    { char buf[256]; snprintf(buf, sizeof(buf), "src=%dx%d dst=%dx%d out=%zu rgba=%zu hdr=%d",
+        m_srcW, m_srcH, m_dstW, m_dstH, outSize, rgbaSrcSize, m_trueHdrEnabled); LogMsg("PIP: ",buf); }
 
     for (int i = 0; i < NUM_SLOTS; i++) {
         m_slots[i].w = m_srcW;
@@ -334,7 +340,7 @@ void PipelineController::ThreadFuncImpl() {
 
         // Pinned (page-locked) CPU memory for high-speed DMA transfers
         if (cudaMallocHost(&m_slots[i].nv12_cpu, nv12Size) != cudaSuccess ||
-            cudaMallocHost(&m_slots[i].nv12_out_cpu, nv12OutSize) != cudaSuccess) {
+            cudaMallocHost(&m_slots[i].nv12_out_cpu, outSize) != cudaSuccess) {
             LogMsg("PIP: ","Failed to allocate pinned CPU memory");
             if (onError) onError(L"内存分配失败");
             m_state.store(PipelineState::Error);
@@ -344,7 +350,7 @@ void PipelineController::ThreadFuncImpl() {
         if (cudaMalloc(&m_slots[i].d_nv12, nv12Size) != cudaSuccess ||
             cudaMalloc(&m_slots[i].d_rgba_src, rgbaSrcSize) != cudaSuccess ||
             cudaMalloc(&m_slots[i].d_rgba_dst, rgbaDstSize) != cudaSuccess ||
-            cudaMalloc(&m_slots[i].d_nv12_out, nv12OutSize) != cudaSuccess) {
+            cudaMalloc(&m_slots[i].d_nv12_out, outSize) != cudaSuccess) {
             LogMsg("PIP: ","Failed to allocate GPU memory");
             if (onError) onError(L"GPU 内存分配失败，请检查显存");
             m_state.store(PipelineState::Error);
@@ -375,7 +381,7 @@ void PipelineController::ThreadFuncImpl() {
 
     // ---- Open VSR (SEH-safe) ----
     LogStatus(onStatus, "初始化 VSR (NGX)...");
-    if (!SafeVSRInit(&m_vsr, m_cfg.gpuIndex)) {
+    if (!SafeVSRInit(&m_vsr, m_cfg.gpuIndex, m_trueHdrEnabled)) {
         LogMsg("PIP: ","VSR init failed");
         if (onError) onError(L"VSR 初始化失败，请检查 GPU 和驱动（需要 550+）");
         m_state.store(PipelineState::Error);
@@ -410,6 +416,7 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.colorTransfer  = m_avColorTransfer;
         encCfg.colorSpace     = m_avColorSpace;
         encCfg.colorRange     = m_avColorRange;
+        encCfg.use10Bit       = m_trueHdrEnabled;
 
         std::string lastEncErr;
         auto encStatus = [&](const char* msg) {
@@ -546,15 +553,22 @@ void PipelineController::ThreadFuncImpl() {
             uint8_t* encUV = nullptr;
             int encYPitch = 0, encUVPitch = 0;
             if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
-                // GPU zero-copy path: rgba_to_nv12 → encoder's CUDA hwframe buffer
-                launch_rgba_to_nv12(
-                    slot.d_rgba_dst, m_dstW * 4,
-                    encY, encYPitch,
-                    encUV, encUVPitch,
-                    m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                // GPU zero-copy path: render directly into encoder's CUDA hwframe
+                if (m_trueHdrEnabled) {
+                    launch_abgr10_to_p010(
+                        slot.d_rgba_dst, m_dstW * 4,
+                        encY, encYPitch,
+                        encUV, encUVPitch,
+                        m_dstW, m_dstH, slot.stream);
+                } else {
+                    launch_rgba_to_nv12(
+                        slot.d_rgba_dst, m_dstW * 4,
+                        encY, encYPitch,
+                        encUV, encUVPitch,
+                        m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                }
                 cudaStreamSynchronize(slot.stream);
-                if (CudaFailed("GPU: RGBA->NV12 (CUDA enc)")) {
-                    LogMsg("PIP: ","GPU: CUDA error in RGBA->NV12 (CUDA enc)");
+                if (CudaFailed(m_trueHdrEnabled ? "GPU: ABGR10->P010 (CUDA enc)" : "GPU: RGBA->NV12 (CUDA enc)")) {
                     m_state.store(PipelineState::Error);
                     break;
                 }
@@ -565,21 +579,32 @@ void PipelineController::ThreadFuncImpl() {
                     break;
                 }
             } else {
-                // CPU fallback: render to d_nv12_out, D2H, CPU encode
-                launch_rgba_to_nv12(
-                    slot.d_rgba_dst, m_dstW * 4,
-                    slot.d_nv12_out, m_dstW,
-                    slot.d_nv12_out + m_dstW * m_dstH, m_dstW,
-                    m_dstW, m_dstH, slot.stream, m_colorMatrix);
-                cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, nv12OutSize,
+                // CPU fallback: render to output buffer, D2H, CPU encode
+                int outYStride  = m_trueHdrEnabled ? m_dstW * 2 : m_dstW;
+                int outUVStride = m_trueHdrEnabled ? m_dstW * 2 : m_dstW;
+                size_t yPlaneBytes = outYStride * m_dstH;
+                if (m_trueHdrEnabled) {
+                    launch_abgr10_to_p010(
+                        slot.d_rgba_dst, m_dstW * 4,
+                        slot.d_nv12_out, outYStride,
+                        slot.d_nv12_out + yPlaneBytes, outUVStride,
+                        m_dstW, m_dstH, slot.stream);
+                } else {
+                    launch_rgba_to_nv12(
+                        slot.d_rgba_dst, m_dstW * 4,
+                        slot.d_nv12_out, outYStride,
+                        slot.d_nv12_out + yPlaneBytes, outUVStride,
+                        m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                }
+                cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
                                 cudaMemcpyDeviceToHost, slot.stream);
                 cudaStreamSynchronize(slot.stream);
-                if (CudaFailed("GPU: RGBA->NV12 + D2H")) {
-                    LogMsg("PIP: ","GPU: CUDA error in RGBA->NV12 or D2H");
+                if (CudaFailed(m_trueHdrEnabled ? "GPU: ABGR10->P010 + D2H" : "GPU: RGBA->NV12 + D2H")) {
+                    LogMsg("PIP: ","GPU: CUDA error in convert kernel or D2H");
                     m_state.store(PipelineState::Error);
                     break;
                 }
-                if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, encPts)) {
+                if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, outYStride, outUVStride, encPts)) {
                     LogMsg("PIP: ","Encode failed");
                     if (onError) onError(L"编码失败");
                     m_state.store(PipelineState::Error);

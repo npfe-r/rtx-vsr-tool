@@ -150,6 +150,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         return false;
     }
 
+    // 10-bit encoder validation (H.264 NVENC and libx264 do not support 10-bit)
+    if (cfg.use10Bit && (cfg.codecId == 0 || cfg.codecId == 3)) {
+        if (statusCb) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "编码器 %s 不支持 10-bit 输出 (TrueHDR)", displayName);
+            statusCb(msg);
+        }
+        return false;
+    }
+
     const char* ext = GetContainerExt(cfg.container);
     avformat_alloc_output_context2(&m->fmtCtx, NULL, ext, NULL);
     if (!m->fmtCtx) { LogMsg("ENC: ","avformat_alloc_output_context2 failed"); return false; }
@@ -161,19 +171,33 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     AVRational fpsRat = av_d2q(cfg.fps, 1001);
     m->encCtx->time_base = av_inv_q(fpsRat);
     m->encCtx->framerate = fpsRat;
-    m->encCtx->pix_fmt   = m->pixFmt = IsNVENCByName(encName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    if (cfg.use10Bit) {
+        m->encCtx->pix_fmt = m->pixFmt = IsNVENCByName(encName) ? AV_PIX_FMT_CUDA : AV_PIX_FMT_YUV420P10LE;
+    } else {
+        m->encCtx->pix_fmt = m->pixFmt = IsNVENCByName(encName) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+    }
     m->encCtx->color_range = AVCOL_RANGE_MPEG;
-    // Use source colour metadata when available, fall back to BT.709.
-    // "Unspecified" in FFmpeg is either 0 (Reserved) or 2.
-    m->encCtx->color_primaries =
-        (cfg.colorPrimaries > 0 && cfg.colorPrimaries != 2)
-        ? (AVColorPrimaries)cfg.colorPrimaries : AVCOL_PRI_BT709;
-    m->encCtx->color_trc =
-        (cfg.colorTransfer > 0 && cfg.colorTransfer != 2)
-        ? (AVColorTransferCharacteristic)cfg.colorTransfer : AVCOL_TRC_BT709;
-    m->encCtx->colorspace =
-        (cfg.colorSpace > 0 && cfg.colorSpace != 2)
-        ? (AVColorSpace)cfg.colorSpace : AVCOL_SPC_BT709;
+    if (cfg.use10Bit) {
+        // HDR10 metadata: BT.2020 primaries, PQ transfer, BT.2020_NCL matrix.
+        // When TrueHDR is active the output is always in HDR10 colour space
+        // regardless of source metadata — the NGX TrueHDR engine tone-maps
+        // SDR content into the HDR BT.2020 PQ container internally.
+        m->encCtx->color_primaries = AVCOL_PRI_BT2020;
+        m->encCtx->color_trc       = AVCOL_TRC_SMPTE2084;  // PQ / ST 2084
+        m->encCtx->colorspace      = AVCOL_SPC_BT2020_NCL;
+    } else {
+        // Use source colour metadata when available, fall back to BT.709.
+        // "Unspecified" in FFmpeg is either 0 (Reserved) or 2.
+        m->encCtx->color_primaries =
+            (cfg.colorPrimaries > 0 && cfg.colorPrimaries != 2)
+            ? (AVColorPrimaries)cfg.colorPrimaries : AVCOL_PRI_BT709;
+        m->encCtx->color_trc =
+            (cfg.colorTransfer > 0 && cfg.colorTransfer != 2)
+            ? (AVColorTransferCharacteristic)cfg.colorTransfer : AVCOL_TRC_BT709;
+        m->encCtx->colorspace =
+            (cfg.colorSpace > 0 && cfg.colorSpace != 2)
+            ? (AVColorSpace)cfg.colorSpace : AVCOL_SPC_BT709;
+    }
     m->encCtx->chroma_sample_location = AVCHROMA_LOC_LEFT;
 
     if (IsNVENCByName(encName)) {
@@ -209,7 +233,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
                 AVBufferRef* hwfc_ref = av_hwframe_ctx_alloc(m->hwDeviceCtx);
                 AVHWFramesContext* hwfc = (AVHWFramesContext*)hwfc_ref->data;
                 hwfc->format    = AV_PIX_FMT_CUDA;
-                hwfc->sw_format = AV_PIX_FMT_NV12;
+                hwfc->sw_format = cfg.use10Bit ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
                 hwfc->width     = cfg.width;
                 hwfc->height    = cfg.height;
                 hwfc->initial_pool_size = 4;
@@ -326,8 +350,14 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     avcodec_parameters_from_context(m->videoStream->codecpar, m->encCtx);
     m->videoStream->time_base = m->encCtx->time_base;
 
-    // Initialize swscale for NV12→YUV420P conversion (software encoders only)
-    if (m->pixFmt == AV_PIX_FMT_YUV420P) {
+    // Initialize swscale for NV12/P010 → encoder pixel format (software encoders)
+    if (m->pixFmt == AV_PIX_FMT_YUV420P10LE) {
+        m->swsCtx = sws_getContext(
+            cfg.width, cfg.height, AV_PIX_FMT_P010LE,
+            cfg.width, cfg.height, AV_PIX_FMT_YUV420P10LE,
+            SWS_BILINEAR, NULL, NULL, NULL);
+        { char _b[256]; snprintf(_b, sizeof(_b), "sws: P010LE → YUV420P10LE (%dx%d)", cfg.width, cfg.height); LogMsg("ENC: ",_b); }
+    } else if (m->pixFmt == AV_PIX_FMT_YUV420P) {
         m->swsCtx = sws_getContext(
             cfg.width, cfg.height, AV_PIX_FMT_NV12,
             cfg.width, cfg.height, AV_PIX_FMT_YUV420P,
@@ -423,7 +453,16 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
 bool VideoEncoder::WriteFrameNV12(const uint8_t* data, int yStride, int uvStride, int64_t pts) {
     if (!m->frame || !m->encCtx) return false;
 
-    if (m->pixFmt == AV_PIX_FMT_YUV420P && m->swsCtx) {
+    if (m->pixFmt == AV_PIX_FMT_YUV420P10LE && m->swsCtx) {
+        // P010 → YUV420P10LE (10-bit software encoders)
+        const uint8_t* srcData[2] = {
+            data,
+            data + yStride * m->encCtx->height
+        };
+        int srcLinesizes[2] = { yStride, uvStride };
+        sws_scale(m->swsCtx, srcData, srcLinesizes, 0, m->encCtx->height,
+                  m->frame->data, m->frame->linesize);
+    } else if (m->pixFmt == AV_PIX_FMT_YUV420P && m->swsCtx) {
         uint8_t* srcData[2] = {
             const_cast<uint8_t*>(data),
             const_cast<uint8_t*>(data + yStride * m->encCtx->height)
