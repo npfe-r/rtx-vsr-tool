@@ -780,7 +780,7 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         float btnW = ImGui::GetContentRegionAvail().x;
         if (ImGui::Button("参数设置", ImVec2(btnW, 0))) {
-            ImGui::OpenPopup("truehdr_params");
+            ImGui::OpenPopup("TrueHDR 设置");
         }
     }
     if (m_isRunning) ImGui::EndDisabled();
