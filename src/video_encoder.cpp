@@ -243,42 +243,55 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
         snprintf(crfStr, sizeof(crfStr), "%d", cfg.crf);
         av_opt_set(m->encCtx->priv_data, "crf", crfStr, 0);
 
-        int cpuUsed = 0;
-        const char* usage = "good";
-        switch (cfg.speed) {
-            case 0: cpuUsed = 6; usage = "realtime"; break;
-            case 1: cpuUsed = 5; usage = "realtime"; break;
-            case 2: cpuUsed = 3; usage = "good";     break;
-            case 3: cpuUsed = 1; usage = "good";     break;
-            case 4: cpuUsed = 0; usage = "good";     break;
+        // Don't set thread_count explicitly for software encoders — leave at 0
+        // (auto) so the encoder manages its own thread pool.  Setting it to
+        // hardware_concurrency() can cause x265_encoder_open to reject the
+        // configuration with AVERROR_INVALIDDATA if the pool size string
+        // format is incompatible with the x265 version in the FFmpeg build.
+
+        // Codec-specific options: each software encoder uses different
+        // private AVOptions.  Applying libaom-av1-specific options
+        // (cpu-used, usage, row-mt, lag-in-frames, tile-*) to other
+        // encoders may cause x265_encoder_open to fail with AVERROR_INVALIDDATA.
+        const char* swPresets[] = { "ultrafast", "superfast", "veryfast", "medium", "veryslow" };
+        int idx = cfg.speed;
+        if (idx < 0) idx = 0;
+        if (idx > 4) idx = 4;
+
+        if (strcmp(encName, "libx264") == 0) {
+            av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
+            av_opt_set_int(m->encCtx->priv_data, "bf", 0, 0);
+        } else if (strcmp(encName, "libx265") == 0) {
+            av_opt_set(m->encCtx->priv_data, "preset", swPresets[idx], 0);
+            av_opt_set_int(m->encCtx->priv_data, "bframes", 0, 0);
+        } else if (strcmp(encName, "libaom-av1") == 0) {
+            int cpuUsed = 0;
+            const char* usage = "good";
+            switch (idx) {
+                case 0: cpuUsed = 6; usage = "realtime"; break;
+                case 1: cpuUsed = 5; usage = "realtime"; break;
+                case 2: cpuUsed = 3; usage = "good";     break;
+                case 3: cpuUsed = 1; usage = "good";     break;
+                case 4: cpuUsed = 0; usage = "good";     break;
+            }
+            av_opt_set_int(m->encCtx->priv_data, "cpu-used", cpuUsed, 0);
+            av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
+            av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
+            av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
+            av_opt_set_int(m->encCtx->priv_data, "arnr-maxframes", 0, 0);
+            av_opt_set_int(m->encCtx->priv_data, "arnr-strength", 0, 0);
+            av_opt_set_int(m->encCtx->priv_data, "tile-columns", cfg.width >= 3840 ? 1 : 0, 0);
+            av_opt_set_int(m->encCtx->priv_data, "tile-rows", cfg.height >= 2160 ? 1 : 0, 0);
+        } else {
+            EncLog("Unknown software encoder, setting only CRF");
         }
-
-        m->encCtx->thread_count = (int)std::thread::hardware_concurrency();
-        av_opt_set_int(m->encCtx->priv_data, "cpu-used", cpuUsed, 0);
-        av_opt_set(m->encCtx->priv_data, "usage", usage, 0);
-        av_opt_set_int(m->encCtx->priv_data, "row-mt", 1, 0);
-        av_opt_set_int(m->encCtx->priv_data, "lag-in-frames", 0, 0);
-
-        // Disable B-frames for software encoders — same rationale as NVENC bf=0
-        // above: the pipeline sends one frame at a time and expects the encoder
-        // to output the packet immediately. B-frames would cause internal
-        // reordering and produce wrong frame timing.
-        av_opt_set_int(m->encCtx->priv_data, "bf", 0, 0);      // libx264
-        av_opt_set_int(m->encCtx->priv_data, "bframes", 0, 0); // libx265
-        av_opt_set_int(m->encCtx->priv_data, "arnr-maxframes", 0, 0); // libaom-av1 alt-ref
-        av_opt_set_int(m->encCtx->priv_data, "arnr-strength", 0, 0);  // libaom-av1 alt-ref
-
-        int tileCols = 0, tileRows = 0;
-        if (cfg.width >= 3840) tileCols = 1;
-        if (cfg.height >= 2160) tileRows = 1;
-        av_opt_set_int(m->encCtx->priv_data, "tile-columns", tileCols, 0);
-        av_opt_set_int(m->encCtx->priv_data, "tile-rows", tileRows, 0);
     }
 
     int ret = avcodec_open2(m->encCtx, codec, NULL);
     if (ret < 0) {
         char err[256];
         av_strerror(ret, err, sizeof(err));
+        { char _b[384]; snprintf(_b, sizeof(_b), "avcodec_open2 failed: ret=%d (%s)", ret, err); EncLog(_b); }
         if (statusCb) {
             char msg[256];
             snprintf(msg, sizeof(msg), "编码器 %s 打开失败: %s", displayName, err);
