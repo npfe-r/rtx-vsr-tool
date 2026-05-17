@@ -669,7 +669,7 @@ void MainWindow::RenderUI()
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d", outW, outH);
 
         // Output FPS (FRUC doubles the output frame rate)
-        double outFps = m_outputFps > 0 ? (double)m_outputFps : m_videoInfo.fps;
+        double outFps = m_videoInfo.fps;
         if (m_frameInterpolation) outFps *= 2.0;
         ImGui::Text("帧率");
         ImGui::SameLine();
@@ -912,21 +912,6 @@ void MainWindow::RenderUI()
     ImGui::PopItemWidth();
     if (disableRes) ImGui::EndDisabled();
 
-    // Output FPS
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text("FPS");
-    ImGui::SameLine(labelW);
-    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 75);
-    if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::InputInt("##outfps", &m_outputFps, 0, 0)) {
-        if (m_videoInfo.fps > 0 && m_outputFps > (int)m_videoInfo.fps)
-            m_outputFps = (int)m_videoInfo.fps;
-        m_config.Get().outputFps = m_outputFps;
-    }
-    if (m_isRunning) ImGui::EndDisabled();
-    ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::TextDisabled("0=源帧率");
     ImGui::Separator();
 
     // Encoder
@@ -1212,10 +1197,6 @@ void MainWindow::OnSelectInput()
                          "处理速度可能显著降低。");
             }
 
-            if (m_videoInfo.fps > 0 && m_outputFps > (int)m_videoInfo.fps) {
-                m_outputFps = (int)m_videoInfo.fps;
-                m_config.Get().outputFps = m_outputFps;
-            }
         } else {
             snprintf(m_inputInfo, sizeof(m_inputInfo), "无法打开文件");
             snprintf(m_statusText, sizeof(m_statusText), "无法打开输入文件");
@@ -1351,7 +1332,6 @@ void MainWindow::OnStartStop()
         pc.container    = m_containerFormat;
         pc.audioMode = m_audioMode;
         pc.audioBitrate = m_audioBitrate;
-        pc.outputFps    = m_outputFps;
         pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
         pc.frameInterpolation = (m_frameInterpolation != 0);
         pc.thdrContrast    = m_thdrContrast;
@@ -1491,7 +1471,6 @@ void MainWindow::LoadConfigToUI()
     m_containerFormat = cfg.containerFormat;
     m_audioMode    = cfg.audioMode;
     m_audioBitrate    = cfg.audioBitrate;
-    m_outputFps       = cfg.outputFps;
     m_trueHdrEnabled    = cfg.trueHdrEnabled;
     // Auto-correct encoder if TrueHDR is on and current encoder doesn't support 10-bit
     if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3))
@@ -1521,7 +1500,6 @@ void MainWindow::SaveUIToConfig()
     cfg.containerFormat = m_containerFormat;
     cfg.audioMode    = m_audioMode;
     cfg.audioBitrate    = m_audioBitrate;
-    cfg.outputFps       = m_outputFps;
     cfg.trueHdrEnabled  = m_trueHdrEnabled;
     cfg.thdrContrast    = m_thdrContrast;
     cfg.thdrSaturation  = m_thdrSaturation;

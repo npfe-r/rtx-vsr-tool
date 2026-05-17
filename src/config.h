@@ -22,7 +22,6 @@ struct VSRConfig {
     int encoderSpeed = 3;           // 0=fast ... 4=slow
     int gpuIndex = 0;
     int containerFormat = 0;        // 0=mp4, 1=mov
-    int outputFps = 0;              // 0=source fps
     int audioMode = 1;              // 0=no audio, 1=copy source, 2=AAC encode
     int audioBitrate = 128;         // kbps: 64, 96, 128, 192, 256, 320
     int trueHdrEnabled = 0;         // 0=disabled, 1=enabled (TrueHDR / HDR tone mapping)

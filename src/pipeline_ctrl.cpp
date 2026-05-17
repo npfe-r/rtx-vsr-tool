@@ -350,7 +350,7 @@ void PipelineController::ThreadFuncImpl() {
     }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
-    double outFps = m_cfg.outputFps > 0 ? (double)m_cfg.outputFps : m_srcFps;
+    double outFps = m_srcFps;
 
     {
         char buf[256];

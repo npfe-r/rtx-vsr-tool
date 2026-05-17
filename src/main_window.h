@@ -73,7 +73,6 @@ private:
     int     m_containerFormat  = 0;
     int     m_audioMode        = 1;
     int     m_audioBitrate     = 128;
-    int     m_outputFps        = 0;
     int     m_trueHdrEnabled   = 0;
     int     m_thdrContrast    = 100;
     int     m_thdrSaturation  = 100;

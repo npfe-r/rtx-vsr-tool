@@ -38,7 +38,6 @@ void Config::Load() {
     m_config.encoderSpeed = r(L"Params", L"Speed", 3);
     m_config.gpuIndex     = r(L"Params", L"GPU", 0);
     m_config.containerFormat = r(L"Params", L"Container", 0);
-    m_config.outputFps    = r(L"Params", L"OutputFps", 0);
     m_config.audioMode = r(L"Params", L"AudioMode", 1);
     m_config.audioBitrate = r(L"Params", L"AudioBitrate", 128);
     m_config.trueHdrEnabled = r(L"Params", L"TrueHdr", 0);
@@ -69,7 +68,6 @@ void Config::Save() {
     w(L"Params", L"Speed",     m_config.encoderSpeed);
     w(L"Params", L"GPU",       m_config.gpuIndex);
     w(L"Params", L"Container", m_config.containerFormat);
-    w(L"Params", L"OutputFps", m_config.outputFps);
     w(L"Params", L"AudioMode", m_config.audioMode);
     w(L"Params", L"AudioBitrate", m_config.audioBitrate);
     w(L"Params", L"TrueHdr", m_config.trueHdrEnabled);

@@ -53,7 +53,6 @@ struct PipelineConfig {
     int encoderSpeed = 3;
     int gpuIndex = 0;
     int container = 0;
-    int outputFps = 0;
     int audioMode = 1;
     int audioBitrate = 128;
     bool trueHdrEnabled = false;
