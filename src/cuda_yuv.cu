@@ -130,25 +130,27 @@ __global__ void abgr10_to_p010_kernel(
     uint8_t* __restrict__ uv_plane, int uv_pitch,
     int w, int h, bool bt2020)
 {
-    int x = (blockIdx.x * blockDim.x + threadIdx.x) * 2; // left pixel of 2×2 block (even)
-    int y = (blockIdx.y * blockDim.y + threadIdx.y) * 2; // top row   of 2×2 block (even)
-    if (x + 1 >= w || y + 1 >= h) return;
+    int baseX = (blockIdx.x * blockDim.x + threadIdx.x) * 2;
+    int baseY = (blockIdx.y * blockDim.y + threadIdx.y) * 2;
+    // Must be in-bounds for the 2×2 block start; Y handles partial blocks
+    // (odd dimensions) with per-pixel bounds checks below.
+    if (baseX >= w || baseY >= h) return;
 
     const uint32_t* src = (const uint32_t*)abgr10;
 
-    // BT.2020 or BT.709 Kr/Kb coefficients
     float Kr = bt2020 ? 0.2627f : 0.2126f;
     float Kb = bt2020 ? 0.0593f : 0.0722f;
     float Kg = 1.0f - Kr - Kb;
 
-    // Accumulate chroma over 2×2 block
+    // Accumulate chroma + Y over valid pixels in the 2×2 block
     float sumCb = 0.0f, sumCr = 0.0f;
     float Ys[2][2];
+    int validPixels = 0;
 
-    for (int dy = 0; dy < 2; ++dy) {
-        const uint32_t* row = src + (y + dy) * (abgr10_pitch / 4);
-        for (int dx = 0; dx < 2; ++dx) {
-            uint32_t p = row[x + dx];
+    for (int dy = 0; dy < 2 && (baseY + dy) < h; ++dy) {
+        const uint32_t* row = src + (baseY + dy) * (abgr10_pitch / 4);
+        for (int dx = 0; dx < 2 && (baseX + dx) < w; ++dx) {
+            uint32_t p = row[baseX + dx];
             float R = (float)(p & 0x3FF)       / 1023.0f;
             float G = (float)((p >> 10) & 0x3FF) / 1023.0f;
             float B = (float)((p >> 20) & 0x3FF) / 1023.0f;
@@ -157,28 +159,32 @@ __global__ void abgr10_to_p010_kernel(
             Ys[dy][dx] = Yp;
             sumCb += 0.5f * (B - Yp) / (1.0f - Kb);
             sumCr += 0.5f * (R - Yp) / (1.0f - Kr);
+            validPixels++;
         }
     }
-
-    float avgCb = sumCb * 0.25f;
-    float avgCr = sumCr * 0.25f;
 
     // Quantise to 10-bit limited range with proper rounding + high-bit shift
     auto toY  = [](float Y)  -> uint16_t { int v = (int)lrintf(64.0f + Y  * 876.0f); return (uint16_t)(clamp(v, 64, 940) << 6); };
     auto toUV = [](float C)  -> uint16_t { int v = (int)lrintf(512.0f + C * 896.0f); return (uint16_t)(clamp(v, 64, 960) << 6); };
 
-    // Write Y — 4 pixels per 2×2 block
-    uint16_t* yRow0 = (uint16_t*)(y_plane + (y + 0) * y_pitch);
-    uint16_t* yRow1 = (uint16_t*)(y_plane + (y + 1) * y_pitch);
-    yRow0[x + 0] = toY(Ys[0][0]);
-    yRow0[x + 1] = toY(Ys[0][1]);
-    yRow1[x + 0] = toY(Ys[1][0]);
-    yRow1[x + 1] = toY(Ys[1][1]);
+    // Write Y — every valid pixel in the 2×2 block
+    for (int dy = 0; dy < 2 && (baseY + dy) < h; dy++) {
+        uint16_t* yRow = (uint16_t*)(y_plane + (baseY + dy) * y_pitch);
+        for (int dx = 0; dx < 2 && (baseX + dx) < w; dx++) {
+            yRow[baseX + dx] = toY(Ys[dy][dx]);
+        }
+    }
 
-    // Write interleaved UV at chroma resolution (w × h/2)
-    uint16_t* uvRow = (uint16_t*)(uv_plane + (y / 2) * uv_pitch);
-    uvRow[x + 0] = toUV(avgCb);  // U
-    uvRow[x + 1] = toUV(avgCr);  // V
+    // Write interleaved UV at chroma resolution — only for complete 2×2 blocks
+    // (UV subsampling requires pairs; single-pixel edges have no chroma output)
+    if (baseX + 1 < w && baseY + 1 < h) {
+        float inv = 1.0f / (float)validPixels;
+        float avgCb = sumCb * inv;
+        float avgCr = sumCr * inv;
+        uint16_t* uvRow = (uint16_t*)(uv_plane + (baseY / 2) * uv_pitch);
+        uvRow[baseX + 0] = toUV(avgCb);  // U
+        uvRow[baseX + 1] = toUV(avgCr);  // V
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────

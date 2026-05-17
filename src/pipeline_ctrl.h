@@ -117,6 +117,7 @@ private:
 
         cudaStream_t stream = nullptr;
         cudaEvent_t decodeEvent = nullptr; // NVDEC default-stream → per-slot stream sync
+        cudaEvent_t vsrEvent = nullptr;    // VSR default-stream → per-slot stream sync
         std::atomic<SlotState> state{SlotState::Empty};
 
         std::atomic<int> seq{0}; // frame sequence number, set by decode thread

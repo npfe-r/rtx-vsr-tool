@@ -266,9 +266,9 @@ bool FrameInterpolator::Initialize(int width, int height, int gpuIndex, int colo
     // 5. Register resources with FRUC
     //    Layout: [interp, render0, render1] — interp first, then render
     void* resources[3];
-    resources[0] = (void*)&m_interpolateResource;
-    resources[1] = (void*)&m_renderResources[0];
-    resources[2] = (void*)&m_renderResources[1];
+    resources[0] = (void*)m_interpolateResource;
+    resources[1] = (void*)m_renderResources[0];
+    resources[2] = (void*)m_renderResources[1];
 
     NvOFFRUC_RegisterResourceParams regParams = {};
     regParams.pArrResource[0] = resources[0];
@@ -327,13 +327,13 @@ bool FrameInterpolator::ProcessFrame(uint64_t vsrRgba, double timestamp,
     bool hasRepeat = false;
 
     NvOFFRUC_ProcessInParams inParams = {};
-    inParams.stFrameDataInput.pFrame          = (void*)&m_renderResources[m_currentRenderIndex];
+    inParams.stFrameDataInput.pFrame          = (void*)m_renderResources[m_currentRenderIndex];
     inParams.stFrameDataInput.nTimeStamp      = timestamp;
     inParams.stFrameDataInput.nCuSurfacePitch = (size_t)m_width;
     inParams.bSkipWarp = m_firstFrame ? 1 : 0;
 
     NvOFFRUC_ProcessOutParams outParams = {};
-    outParams.stFrameDataOutput.pFrame          = (void*)&m_interpolateResource;
+    outParams.stFrameDataOutput.pFrame          = (void*)m_interpolateResource;
     outParams.stFrameDataOutput.nTimeStamp      = timestamp;
     outParams.stFrameDataOutput.nCuSurfacePitch = (size_t)m_width;
     outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &hasRepeat;
@@ -361,7 +361,7 @@ bool FrameInterpolator::ProcessFrame(uint64_t vsrRgba, double timestamp,
     // NOT synchronise with the default stream.  Without a full device sync,
     // the nv12_to_rgba conversion below may read stale / partially-written
     // interpolated frame data.
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(0);
 
     // --- Step 4: Convert FRUC NV12 output → RGBA for the encoding pipeline ---
     // The pipeline's encodeFrame() expects RGBA (byte 0=R, 1=G, 2=B, 3=A).
@@ -407,13 +407,13 @@ bool FrameInterpolator::ProcessFrameNV12(uint64_t vsrRgba, double timestamp,
     bool hasRepeat = false;
 
     NvOFFRUC_ProcessInParams inParams = {};
-    inParams.stFrameDataInput.pFrame          = (void*)&m_renderResources[m_currentRenderIndex];
+    inParams.stFrameDataInput.pFrame          = (void*)m_renderResources[m_currentRenderIndex];
     inParams.stFrameDataInput.nTimeStamp      = timestamp;
     inParams.stFrameDataInput.nCuSurfacePitch = (size_t)m_width;
     inParams.bSkipWarp = m_firstFrame ? 1 : 0;
 
     NvOFFRUC_ProcessOutParams outParams = {};
-    outParams.stFrameDataOutput.pFrame          = (void*)&m_interpolateResource;
+    outParams.stFrameDataOutput.pFrame          = (void*)m_interpolateResource;
     outParams.stFrameDataOutput.nTimeStamp      = timestamp;
     outParams.stFrameDataOutput.nCuSurfacePitch = (size_t)m_width;
     outParams.stFrameDataOutput.bHasFrameRepetitionOccurred = &hasRepeat;
@@ -435,7 +435,7 @@ bool FrameInterpolator::ProcessFrameNV12(uint64_t vsrRgba, double timestamp,
     }
 
     // Step 3: Wait for FRUC internal GPU work to complete
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(0);
 
     // Step 4: Return NV12 pointer directly (skip NV12→RGBA conversion)
     outNV12Ptr   = m_interpolateResource;
@@ -460,9 +460,9 @@ void FrameInterpolator::Shutdown() {
     // Unregister and destroy FRUC
     if (m_hFRUC && m_NvOFFRUCDestroy && m_NvOFFRUCUnregisterResource) {
         void* resources[3];
-        resources[0] = (void*)&m_interpolateResource;
-        resources[1] = (void*)&m_renderResources[0];
-        resources[2] = (void*)&m_renderResources[1];
+        resources[0] = (void*)m_interpolateResource;
+        resources[1] = (void*)m_renderResources[0];
+        resources[2] = (void*)m_renderResources[1];
 
         NvOFFRUC_UnregisterResourceParams unregParams = {};
         unregParams.pArrResource[0] = resources[0];

@@ -1378,6 +1378,14 @@ void MainWindow::OnPauseResume()
 
 void MainWindow::OnPipelineProgress(const PipelineProgress& p)
 {
+    // Throttle: skip posting if the message queue already has a pending progress
+    // update.  The UI thread processes the most recent progress on each dispatch,
+    // so skipping intermediate updates is safe — the user still sees the latest
+    // frame count / FPS / ETA when the backlog clears.
+    MSG existing = {};
+    if (PeekMessageW(&existing, m_hWnd, WM_USER + 1, WM_USER + 1, PM_NOREMOVE))
+        return;
+
     PostMessageW(m_hWnd, WM_USER + 1, (WPARAM)new PipelineProgress(p), 0);
 }
 

@@ -110,8 +110,12 @@ void PipelineController::ThreadFunc() {
             if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
             if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
             if (m_slots[i].decodeEvent)  cudaEventDestroy(m_slots[i].decodeEvent);
+            if (m_slots[i].vsrEvent)     cudaEventDestroy(m_slots[i].vsrEvent);
             if (m_slots[i].stream)       cudaStreamDestroy(m_slots[i].stream);
         }
+        __try { m_encoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { m_decoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { m_frameInterpolator.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
         m_state.store(PipelineState::Error);
         LogMsg("PIP: ","ThreadFunc SEH handler done");
@@ -121,7 +125,12 @@ void PipelineController::ThreadFunc() {
 void PipelineController::DecodeFunc() {
     LogMsg("PIP: ","--- Decode thread started ---");
 
-    cudaSetDevice(m_cfg.gpuIndex);
+    if (cudaSetDevice(m_cfg.gpuIndex) != cudaSuccess) {
+        LogMsg("PIP: ","Decode: cudaSetDevice failed");
+        m_decodeDone.store(true);
+        m_slotCv.notify_one();
+        return;
+    }
     LogMsg("PIP: ","Decode: CUDA device set");
 
     // Decode path: NVDEC GPU (device pointers directly) or CPU software (NV12→H2D).
@@ -152,6 +161,16 @@ void PipelineController::DecodeFunc() {
             std::unique_lock<std::mutex> lk(m_slotMutex);
             m_slotCv.wait_for(lk, std::chrono::milliseconds(SLOT_WAIT_MS));
             continue;
+        }
+
+        // Check if pipeline was stopped between the initial state check and the CAS.
+        // Without this check, Stop() → Idle can race with the CAS, causing the decode
+        // thread to process a frame after the pipeline has been torn down.
+        if (m_state.load() != PipelineState::Running) {
+            m_slots[slotIdx].state.store(SlotState::Empty);
+            m_slotCv.notify_one();
+            LogMsg("PIP: ","Decode: state changed after slot CAS, exiting");
+            break;
         }
 
         FrameSlot& slot = m_slots[slotIdx];
@@ -391,6 +410,11 @@ void PipelineController::ThreadFuncImpl() {
             m_state.store(PipelineState::Error);
             goto cleanup;
         }
+        if (cudaEventCreate(&m_slots[i].vsrEvent) != cudaSuccess) {
+            LogMsg("PIP: ","Failed to create VSR CUDA event");
+            m_state.store(PipelineState::Error);
+            goto cleanup;
+        }
 
         m_slots[i].state.store(SlotState::Empty);
     }
@@ -538,7 +562,15 @@ void PipelineController::ThreadFuncImpl() {
         }
         if (slotIdx >= 0) {
             SlotState expected = SlotState::VSR_Ready;
-            if (!m_slots[slotIdx].state.compare_exchange_strong(expected, SlotState::Encoding)) {
+            if (m_slots[slotIdx].state.compare_exchange_strong(expected, SlotState::Encoding)) {
+                // CAS succeeded — verify pipeline is still running
+                if (m_state.load() != PipelineState::Running) {
+                    m_slots[slotIdx].state.store(SlotState::Empty);
+                    m_slotCv.notify_one();
+                    LogMsg("PIP: ","GPU: state changed after slot CAS, exiting loop");
+                    break;
+                }
+            } else {
                 slotIdx = -1;
             }
         }
@@ -583,8 +615,8 @@ void PipelineController::ThreadFuncImpl() {
         // implicit synchronisation, so without an explicit barrier the
         // conversion kernel may read stale / partially-written data and
         // produce corrupted output (old frame content leaking through).
-        cudaEventRecord(slot.decodeEvent, 0);          // VSR's default stream
-        cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);  // per-slot waits
+        cudaEventRecord(slot.vsrEvent, 0);             // VSR's default stream
+        cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);  // per-slot waits
 
         // ---- Encode output frame(s) ----
         {
@@ -794,6 +826,7 @@ cleanup:
         m_slots[i].d_rgba_src = m_slots[i].d_rgba_dst = nullptr;
         m_slots[i].d_nv12 = m_slots[i].d_nv12_out = nullptr;
         if (m_slots[i].decodeEvent) { cudaEventDestroy(m_slots[i].decodeEvent); m_slots[i].decodeEvent = nullptr; }
+        if (m_slots[i].vsrEvent) { cudaEventDestroy(m_slots[i].vsrEvent); m_slots[i].vsrEvent = nullptr; }
         if (m_slots[i].stream) { cudaStreamDestroy(m_slots[i].stream); m_slots[i].stream = nullptr; }
     }
 

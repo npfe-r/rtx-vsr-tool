@@ -259,6 +259,7 @@ bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
                         statusCb("编码器: CUDA 零拷贝编码已启用");
                 } else {
                     LogMsg("ENC: ","av_hwframe_ctx_init failed for CUDA hwframe pool");
+                    av_buffer_unref(&hwfc_ref);
                     av_buffer_unref(&m->hwDeviceCtx);
                     m->hwDeviceCtx = nullptr;
                 }
