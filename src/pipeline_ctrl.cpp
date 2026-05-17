@@ -680,16 +680,12 @@ void PipelineController::ThreadFuncImpl() {
                             break;
                         }
                     } else {
-                        // CPU fallback: D2D copy FRUC NV12 → slot.d_nv12_out, then D2H
-                        cudaMemcpy2DAsync(slot.d_nv12_out, m_dstW, (void*)interpPtr, interpPitch,
-                                          m_dstW, m_dstH, cudaMemcpyDeviceToDevice, slot.stream);
-                        cudaMemcpy2DAsync(slot.d_nv12_out + yBytes, m_dstW, (void*)(interpPtr + yBytes), interpPitch,
-                                          m_dstW, m_dstH / 2, cudaMemcpyDeviceToDevice, slot.stream);
-
-                        cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
+                        // CPU fallback: D2H directly from FRUC NV12 output
+                        // (m_interpolateResource is contiguous NV12, skip intermediate d_nv12_out)
+                        cudaMemcpyAsync(slot.nv12_out_cpu, (void*)interpPtr, outSize,
                                         cudaMemcpyDeviceToHost, slot.stream);
                         cudaStreamSynchronize(slot.stream);
-                        if (CudaFailed("CPU: FRUC NV12 D2D + D2H"))
+                        if (CudaFailed("CPU: FRUC NV12 D2H"))
                             break;
                         if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, pts)) {
                             LogMsg("PIP: ","FRUC interpolated WriteFrameNV12 failed");

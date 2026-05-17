@@ -307,9 +307,12 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
                 m_totalFrames   = p->totalFrames;
             }
 
+            double outVidFps = m_videoInfo.fps;
+            if (m_frameInterpolation) outVidFps *= 2.0;
+
             snprintf(m_statusText, sizeof(m_statusText),
-                     "帧 %d/%d  |  FPS: %.1f  |  剩余: %.0fs",
-                     p->currentFrame, p->totalFrames, m_displayFps, m_displayEta);
+                     "帧 %d/%d  |  FPS: %.1f  |  输出 %.0ffps  |  剩余: %.0fs",
+                     p->currentFrame, p->totalFrames, m_displayFps, outVidFps, m_displayEta);
             strncpy(m_decodeMode, p->decodeMode, sizeof(m_decodeMode) - 1);
             delete p;
         }
@@ -350,12 +353,8 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
         auto elapsed = std::chrono::steady_clock::now() - m_startTime;
         float totalSec = std::chrono::duration_cast<std::chrono::duration<float>>(elapsed).count();
 
-        int frames = 0;
+        int frames = m_videoInfo.totalFrames;
         float fps = 0.0f;
-        {
-            std::lock_guard<std::mutex> lk(m_progressMutex);
-            frames = m_totalFrames;
-        }
         if (totalSec > 0.0f && frames > 0)
             fps = frames / totalSec;
 
@@ -638,8 +637,9 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d", outW, outH);
 
-        // Output FPS
+        // Output FPS (FRUC doubles the output frame rate)
         double outFps = m_outputFps > 0 ? (double)m_outputFps : m_videoInfo.fps;
+        if (m_frameInterpolation) outFps *= 2.0;
         ImGui::Text("帧率");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%.2f fps", outFps);
