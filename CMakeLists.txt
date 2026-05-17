@@ -31,7 +31,7 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.cu)
 # Exclude test sources from the main target
 list(FILTER SOURCES EXCLUDE REGEX "test_cuda_enc\\.cpp$")
 
-add_executable(RTX_VSR_Tool WIN32 ${SOURCES})
+add_executable(RTX_VSR_Tool WIN32 ${SOURCES} src/res/resources.rc)
 
 target_include_directories(RTX_VSR_Tool PRIVATE
     src

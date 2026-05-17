@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cuda_runtime.h>
 #include "debug_util.h"
+#include "res/resource.h"
 
 extern "C" {
 #include <libavutil/avutil.h>
@@ -151,7 +152,8 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
     wc.cbSize        = sizeof(WNDCLASSEX);
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
-    wc.hIcon         = LoadIconW(nullptr, (LPCWSTR)IDI_APPLICATION);
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_SMALL));
     wc.hCursor       = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = CLASS_NAME;
