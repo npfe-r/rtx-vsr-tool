@@ -198,7 +198,7 @@ void PipelineController::DecodeFunc() {
 
             // HDR input (PQ/HLG): NVDEC outputs P010, need HDR→SDR tonemapping.
             // SDR input: use standard NV12→RGBA with detected colour matrix.
-            bool isHdr = (m_avColorTransfer == 16 || m_avColorTransfer == 18);
+            bool isHdr = (m_avColorTransfer == AVCOL_TRC_SMPTE2084 || m_avColorTransfer == AVCOL_TRC_ARIB_STD_B67);
             if (isHdr) {
                 launch_p010_to_rgba_sdr(
                     yDev, yPitch,
@@ -342,9 +342,9 @@ void PipelineController::ThreadFuncImpl() {
             "PIP: color: avCS=%d avRange=%d → matrix=%d",
             info.avColorSpace, info.avColorRange, m_colorMatrix);
           LogMsg("PIP: ",_b); }
-        if (info.avColorTransfer == 16) {
+        if (info.avColorTransfer == AVCOL_TRC_SMPTE2084) {
             LogMsg("PIP: ","HDR input detected: PQ (ST.2084) — will tonemap to SDR");
-        } else if (info.avColorTransfer == 18) {
+        } else if (info.avColorTransfer == AVCOL_TRC_ARIB_STD_B67) {
             LogMsg("PIP: ","HDR input detected: HLG (ARIB STD-B67) — will tonemap to SDR");
         }
     }

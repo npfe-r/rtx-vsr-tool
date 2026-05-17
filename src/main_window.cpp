@@ -7,6 +7,10 @@
 #include <cuda_runtime.h>
 #include "debug_util.h"
 
+extern "C" {
+#include <libavutil/avutil.h>
+}
+
 static void widen(const char* utf8, wchar_t* wbuf, int wbufSize)
 {
     MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wbuf, wbufSize);
@@ -186,6 +190,7 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
         "C:\\Windows\\Fonts\\msyhbd.ttc",
         "C:\\Windows\\Fonts\\simhei.ttf",
         "C:\\Windows\\Fonts\\yahei.ttf",
+        "C:\\Windows\\Fonts\\simsun.ttc",
     };
     ImFont* font = nullptr;
     for (auto* fp : fontPaths) {
@@ -194,6 +199,32 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
             io.Fonts->GetGlyphRangesChineseFull());
         if (font) break;
     }
+
+    // Fallback: scan Windows Fonts directory for any .ttf/.ttc file
+    if (!font) {
+        WIN32_FIND_DATAW ffd;
+        HANDLE hFind = FindFirstFileW(L"C:\\Windows\\Fonts\\*", &ffd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const wchar_t* ext = wcsrchr(ffd.cFileName, L'.');
+                if (!ext) continue;
+                if (_wcsicmp(ext, L".ttf") != 0 && _wcsicmp(ext, L".ttc") != 0) continue;
+
+                wchar_t fullPath[512];
+                swprintf(fullPath, 512, L"C:\\Windows\\Fonts\\%s", ffd.cFileName);
+                char narrowPath[512];
+                WideCharToMultiByte(CP_UTF8, 0, fullPath, -1, narrowPath, 512, nullptr, nullptr);
+
+                font = io.Fonts->AddFontFromFileTTF(
+                    narrowPath, 16.0f, &fontCfg,
+                    io.Fonts->GetGlyphRangesChineseFull());
+                if (font) break;
+            } while (FindNextFileW(hFind, &ffd) != 0);
+            FindClose(hFind);
+        }
+    }
+
     if (!font)
         io.Fonts->AddFontDefault();
 
@@ -565,9 +596,9 @@ void MainWindow::RenderUI()
         // Input colour info
         {
             const char* trc  = "";
-            if (m_videoInfo.avColorTransfer == 1) trc = "BT.709";
-            else if (m_videoInfo.avColorTransfer == 16) trc = "PQ";
-            else if (m_videoInfo.avColorTransfer == 18) trc = "HLG";
+            if (m_videoInfo.avColorTransfer == AVCOL_TRC_BT709) trc = "BT.709";
+            else if (m_videoInfo.avColorTransfer == AVCOL_TRC_SMPTE2084) trc = "PQ";
+            else if (m_videoInfo.avColorTransfer == AVCOL_TRC_ARIB_STD_B67) trc = "HLG";
             else trc = "SDR";
             const char* range = (m_videoInfo.avColorRange == 2) ? "full" : "limited";
             const char* cs = "";
@@ -575,7 +606,7 @@ void MainWindow::RenderUI()
             else if (m_videoInfo.avColorSpace == 9) cs = "BT.2020";
             else if (m_videoInfo.avColorSpace == 5 || m_videoInfo.avColorSpace == 6) cs = "BT.601";
             else cs = "未知";
-            bool isHdr = (m_videoInfo.avColorTransfer == 16 || m_videoInfo.avColorTransfer == 18);
+            bool isHdr = (m_videoInfo.avColorTransfer == AVCOL_TRC_SMPTE2084 || m_videoInfo.avColorTransfer == AVCOL_TRC_ARIB_STD_B67);
             char colorBuf[128];
             snprintf(colorBuf, sizeof(colorBuf), "%s  %s  %s", cs, trc, range);
             ImGui::Text("色彩");
@@ -660,7 +691,7 @@ void MainWindow::RenderUI()
         // Output colour info
         {
             bool outIsHdr = m_trueHdrEnabled;
-            bool inIsHdr  = (m_videoInfo.avColorTransfer == 16 || m_videoInfo.avColorTransfer == 18);
+            bool inIsHdr  = (m_videoInfo.avColorTransfer == AVCOL_TRC_SMPTE2084 || m_videoInfo.avColorTransfer == AVCOL_TRC_ARIB_STD_B67);
             ImGui::Text("色彩");
             ImGui::SameLine();
             if (outIsHdr) {

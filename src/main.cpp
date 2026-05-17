@@ -27,16 +27,23 @@ static void RunMessageLoop(MainWindow& window)
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
+    // Declare DPI awareness before any window creation
+    SetProcessDPIAware();
+
     // Clear previous log so each run starts fresh
     {
-        char logPath[MAX_PATH];
-        GetModuleFileNameA(NULL, logPath, sizeof(logPath));
-        char* slash = strrchr(logPath, '\\');
-        if (slash) *(slash + 1) = '\0';
-        strcat_s(logPath, "pipeline_debug.log");
-        FILE* f = nullptr;
-        fopen_s(&f, logPath, "w");
-        if (f) fclose(f);
+        wchar_t widePath[4096];
+        DWORD len = GetModuleFileNameW(NULL, widePath, 4096);
+        if (len > 0 && len < 4096) {
+            wchar_t* slash = wcsrchr(widePath, L'\\');
+            if (slash) *(slash + 1) = L'\0';
+            wcscat_s(widePath, L"pipeline_debug.log");
+            char logPath[4096];
+            WideCharToMultiByte(CP_UTF8, 0, widePath, -1, logPath, 4096, nullptr, nullptr);
+            FILE* f = nullptr;
+            fopen_s(&f, logPath, "w");
+            if (f) fclose(f);
+        }
     }
 
 #ifdef _DEBUG
