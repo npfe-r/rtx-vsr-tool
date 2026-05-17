@@ -60,10 +60,10 @@ __global__ void nv12_to_rgba_kernel(
     int b = (c[0] * Y + c[4] * U       + 128) >> 8;  // bu
 
     int out_idx = y * rgba_pitch + x * 4;
-    rgba_out[out_idx + 0] = (uint8_t)clamp(r, 0, 255);
-    rgba_out[out_idx + 1] = (uint8_t)clamp(g, 0, 255);
-    rgba_out[out_idx + 2] = (uint8_t)clamp(b, 0, 255);
-    rgba_out[out_idx + 3] = 0xFF;
+    rgba_out[out_idx + 0] = (uint8_t)clamp(r, 0, 255);    // R (CUDA tex: comp[0])
+    rgba_out[out_idx + 1] = (uint8_t)clamp(g, 0, 255);    // G (comp[1])
+    rgba_out[out_idx + 2] = (uint8_t)clamp(b, 0, 255);    // B (comp[2])
+    rgba_out[out_idx + 3] = 0xFF;                          // A (comp[3])
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -83,9 +83,9 @@ __global__ void rgba_to_nv12_kernel(
     const int* c = RGB2YUV[matrix];
 
     int idx = y * rgba_pitch + x * 4;
-    int R = rgba[idx + 0];
-    int G = rgba[idx + 1];
-    int B = rgba[idx + 2];
+    int R = rgba[idx + 0];   // CUDA tex: comp[0] = R
+    int G = rgba[idx + 1];   // comp[1] = G
+    int B = rgba[idx + 2];   // comp[2] = B
 
     // Y  (every pixel)
     int Y_val = ((c[0] * R + c[1] * G + c[2] * B + 128) >> 8) + c[9];  // yr, yg, yb, yOff
@@ -97,9 +97,9 @@ __global__ void rgba_to_nv12_kernel(
         for (int dy = 0; dy < 2; dy++) {
             for (int dx = 0; dx < 2; dx++) {
                 int i = (y + dy) * rgba_pitch + (x + dx) * 4;
-                sumR += rgba[i + 0];
-                sumG += rgba[i + 1];
-                sumB += rgba[i + 2];
+                sumR += rgba[i + 0];   // comp[0] = R
+                sumG += rgba[i + 1];   // comp[1] = G
+                sumB += rgba[i + 2];   // comp[2] = B
             }
         }
         int avgR = sumR / 4;
@@ -303,10 +303,10 @@ __global__ void p010_to_rgba_sdr_kernel(
     };
 
     int out_idx = y * rgba_pitch + x * 4;
-    rgba_out[out_idx + 0] = srgb_encode(r709);
-    rgba_out[out_idx + 1] = srgb_encode(g709);
-    rgba_out[out_idx + 2] = srgb_encode(b709);
-    rgba_out[out_idx + 3] = 0xFF;
+    rgba_out[out_idx + 0] = srgb_encode(r709);             // R (CUDA tex: comp[0])
+    rgba_out[out_idx + 1] = srgb_encode(g709);             // G (comp[1])
+    rgba_out[out_idx + 2] = srgb_encode(b709);             // B (comp[2])
+    rgba_out[out_idx + 3] = 0xFF;                          // A (comp[3])
 }
 
 // ────────────────────────────────────────────────────────────────────
