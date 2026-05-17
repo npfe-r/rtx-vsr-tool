@@ -882,13 +882,24 @@ void MainWindow::RenderUI()
     ImGui::Text("编码器");
     ImGui::SameLine(labelW);
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
-    if (m_isRunning) ImGui::BeginDisabled();
     static const char* encoderNames[] = {
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
         "libx264", "libx265", "libaom-av1", "SVT-AV1"
     };
-    if (ImGui::Combo("##enc", &m_encoderIndex, encoderNames, 7))
-        m_config.Get().encoderIndex = m_encoderIndex;
+    bool hdrOn = (m_trueHdrEnabled != 0);
+    if (m_isRunning) ImGui::BeginDisabled();
+    if (ImGui::BeginCombo("##enc", encoderNames[m_encoderIndex], 0)) {
+        for (int i = 0; i < 7; i++) {
+            bool disabled = hdrOn && (i == 0 || i == 3);
+            if (disabled) ImGui::BeginDisabled();
+            if (ImGui::Selectable(encoderNames[i], i == m_encoderIndex)) {
+                m_encoderIndex = i;
+                m_config.Get().encoderIndex = i;
+            }
+            if (disabled) ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -1421,6 +1432,9 @@ void MainWindow::LoadConfigToUI()
     m_audioBitrate    = cfg.audioBitrate;
     m_outputFps       = cfg.outputFps;
     m_trueHdrEnabled    = cfg.trueHdrEnabled;
+    // Auto-correct encoder if TrueHDR is on and current encoder doesn't support 10-bit
+    if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3))
+        m_encoderIndex = 1;
     m_thdrContrast      = cfg.thdrContrast;
     m_thdrSaturation    = cfg.thdrSaturation;
     m_thdrMiddleGray    = cfg.thdrMiddleGray;
