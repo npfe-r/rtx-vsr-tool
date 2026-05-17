@@ -511,14 +511,14 @@ void MainWindow::RenderUI()
 
     // Calculate mid section height from settings panel content (no scrollbar)
     // Count of control rows (each uses AlignTextToFramePadding + Text + SameLine + widget)
-    // Rows: GPU, Quality, HDR, OutputSize, Resolution, FPS, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 12
+    // Rows: GPU, Quality, HDR, FrameInterp, OutputSize, Resolution, FPS, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 13
     // Separators between groups: after HDR, after FPS, after Container = 3
     float midH;
     {
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        const int nControls   = 12;  // update when adding/removing setting rows
+        const int nControls   = 13;  // update when adding/removing setting rows
         const int nSeparators = 3;
         midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
     }
@@ -650,8 +650,9 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
 
-        // Estimate output frame count (same as source unless fps changes)
+        // Estimate output frame count (×2 with FRUC)
         int outFrames = m_videoInfo.totalFrames;
+        if (m_frameInterpolation) outFrames = outFrames * 2 - 1;
         ImGui::Text("帧数");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", outFrames);
@@ -784,6 +785,26 @@ void MainWindow::RenderUI()
         }
     }
     if (m_isRunning) ImGui::EndDisabled();
+
+    // Frame Interpolation (2x FRUC)
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("帧插值");
+    ImGui::SameLine(labelW);
+    {
+        bool fiOn = (m_frameInterpolation != 0);
+        bool fiDisabled = m_isRunning || (m_trueHdrEnabled != 0);
+        if (fiDisabled) ImGui::BeginDisabled();
+        if (ImGui::Checkbox("##fi", &fiOn)) {
+            m_frameInterpolation = fiOn ? 1 : 0;
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "2x FRUC");
+        if (fiDisabled && m_trueHdrEnabled) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "(TrueHDR冲突)");
+        }
+        if (fiDisabled) ImGui::EndDisabled();
+    }
     ImGui::Separator();
 
     // TrueHDR parameter popup
@@ -1301,6 +1322,7 @@ void MainWindow::OnStartStop()
         pc.audioBitrate = m_audioBitrate;
         pc.outputFps    = m_outputFps;
         pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
+        pc.frameInterpolation = (m_frameInterpolation != 0);
         pc.thdrContrast    = m_thdrContrast;
         pc.thdrSaturation  = m_thdrSaturation;
         pc.thdrMiddleGray  = m_thdrMiddleGray;
@@ -1439,6 +1461,7 @@ void MainWindow::LoadConfigToUI()
     m_thdrSaturation    = cfg.thdrSaturation;
     m_thdrMiddleGray    = cfg.thdrMiddleGray;
     m_thdrMaxLuminance  = cfg.thdrMaxLuminance;
+    m_frameInterpolation = cfg.frameInterpolation;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -1465,4 +1488,5 @@ void MainWindow::SaveUIToConfig()
     cfg.thdrSaturation  = m_thdrSaturation;
     cfg.thdrMiddleGray  = m_thdrMiddleGray;
     cfg.thdrMaxLuminance = m_thdrMaxLuminance;
+    cfg.frameInterpolation = m_frameInterpolation;
 }

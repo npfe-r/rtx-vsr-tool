@@ -416,6 +416,21 @@ void PipelineController::ThreadFuncImpl() {
                                 m_cfg.thdrMiddleGray, m_cfg.thdrMaxLuminance);
     }
 
+    // ---- Init FrameInterpolator (FRUC) ----
+    m_fiActive = false;
+    m_totalOutputFrames = m_totalFrames;
+    if (m_cfg.frameInterpolation && !m_trueHdrEnabled && m_cfg.qualityLevel > 0) {
+        LogStatus(onStatus, "初始化帧插值...");
+        if (m_frameInterpolator.Initialize(m_dstW, m_dstH, m_cfg.gpuIndex, m_colorMatrix)) {
+            m_fiActive = true;
+            m_totalOutputFrames = m_frameInterpolator.GetExpectedOutputFrames(m_totalFrames);
+            outFps = m_srcFps * 2.0;
+            { char buf[128]; snprintf(buf, sizeof(buf), "帧插值已启用 (2x), fps=%.3f", outFps); LogStatus(onStatus, buf); }
+        } else {
+            LogStatus(onStatus, "帧插值初始化失败，将不使用");
+        }
+    }
+
     // ---- Open encoder ----
     LogStatus(onStatus, "打开编码器...");
     {
@@ -571,81 +586,153 @@ void PipelineController::ThreadFuncImpl() {
         cudaEventRecord(slot.decodeEvent, 0);          // VSR's default stream
         cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);  // per-slot waits
 
-        // Encode: try GPU zero-copy first, fall back to D2H + CPU encode
+        // ---- Encode output frame(s) ----
         {
-            int64_t encPts = m_framesEncoded.load();
-
-            // Try NVENC zero-copy: get CUDA hwframe buffer, render directly into it
-            uint8_t* encY = nullptr;
-            uint8_t* encUV = nullptr;
-            int encYPitch = 0, encUVPitch = 0;
-            if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
-                // GPU zero-copy path: render directly into encoder's CUDA hwframe
-                if (m_trueHdrEnabled) {
-                    launch_abgr10_to_p010(
-                        slot.d_rgba_dst, m_dstW * 4,
-                        encY, encYPitch,
-                        encUV, encUVPitch,
-                        m_dstW, m_dstH, true, slot.stream);
+            // Encode helper — GPU zero-copy first, D2H+CPU fallback
+            auto encodeFrame = [&](const uint8_t* rgba_src, int64_t pts, bool hdr) -> bool {
+                uint8_t* encY = nullptr;
+                uint8_t* encUV = nullptr;
+                int encYPitch = 0, encUVPitch = 0;
+                if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
+                    // GPU zero-copy
+                    if (hdr) {
+                        launch_abgr10_to_p010(
+                            rgba_src, m_dstW * 4,
+                            encY, encYPitch, encUV, encUVPitch,
+                            m_dstW, m_dstH, true, slot.stream);
+                    } else {
+                        launch_rgba_to_nv12(
+                            rgba_src, m_dstW * 4,
+                            encY, encYPitch, encUV, encUVPitch,
+                            m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                    }
+                    cudaStreamSynchronize(slot.stream);
+                    if (CudaFailed(hdr ? "GPU: ABGR10->P010 (CUDA enc)" : "GPU: RGBA->NV12 (CUDA enc)"))
+                        return false;
+                    if (!m_encoder.SubmitFrame(pts))
+                        return false;
                 } else {
-                    launch_rgba_to_nv12(
-                        slot.d_rgba_dst, m_dstW * 4,
-                        encY, encYPitch,
-                        encUV, encUVPitch,
-                        m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                    // CPU fallback
+                    int outYStride  = hdr ? m_dstW * 2 : m_dstW;
+                    int outUVStride = hdr ? m_dstW * 2 : m_dstW;
+                    size_t yPlaneBytes = outYStride * m_dstH;
+                    if (hdr) {
+                        launch_abgr10_to_p010(
+                            rgba_src, m_dstW * 4,
+                            slot.d_nv12_out, outYStride,
+                            slot.d_nv12_out + yPlaneBytes, outUVStride,
+                            m_dstW, m_dstH, true, slot.stream);
+                    } else {
+                        launch_rgba_to_nv12(
+                            rgba_src, m_dstW * 4,
+                            slot.d_nv12_out, outYStride,
+                            slot.d_nv12_out + yPlaneBytes, outUVStride,
+                            m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                    }
+                    cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
+                                    cudaMemcpyDeviceToHost, slot.stream);
+                    cudaStreamSynchronize(slot.stream);
+                    if (CudaFailed(hdr ? "GPU: ABGR10->P010 + D2H" : "GPU: RGBA->NV12 + D2H"))
+                        return false;
+                    if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, outYStride, outUVStride, pts))
+                        return false;
                 }
-                cudaStreamSynchronize(slot.stream);
-                if (CudaFailed(m_trueHdrEnabled ? "GPU: ABGR10->P010 (CUDA enc)" : "GPU: RGBA->NV12 (CUDA enc)")) {
-                    m_state.store(PipelineState::Error);
-                    break;
+                return true;
+            };
+
+            if (m_fiActive) {
+                // FRUC: interpolated frame first, then original
+                uint64_t interpPtr = 0;
+                int interpPitch = 0;
+                bool frameRepeat = false;
+                double ts = slot.pts >= 0
+                    ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
+                    : (double)slot.seq.load() / m_srcFps;
+
+                // Use NV12 direct path: FRUC outputs NV12 → D2D copy to encoder NV12 buffers,
+                // skipping the NV12→RGBA→NV12 round-trip.
+                if (m_frameInterpolator.ProcessFrameNV12(
+                        (uint64_t)slot.d_rgba_dst, ts, interpPtr, interpPitch, frameRepeat)) {
+                    int64_t pts = (int64_t)m_framesEncoded.load();
+                    char logBuf[128];
+                    snprintf(logBuf, sizeof(logBuf), "FRUC encode interpolated frame seq=%d repeat=%d", (int)pts, (int)frameRepeat);
+                    LogMsg("PIP: ", logBuf);
+
+                    // NV12 D2D copy to encoder's frame buffer (GPU zero-copy) or device buffer (CPU fallback)
+                    uint8_t* encY = nullptr;
+                    uint8_t* encUV = nullptr;
+                    int encYPitch = 0, encUVPitch = 0;
+                    size_t yBytes = (size_t)m_dstW * m_dstH;
+                    if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
+                        // GPU zero-copy: D2D copy FRUC NV12 → encoder NV12 buffers
+                        cudaMemcpy2DAsync(encY, encYPitch, (void*)interpPtr, interpPitch,
+                                          m_dstW, m_dstH, cudaMemcpyDeviceToDevice, slot.stream);
+                        cudaMemcpy2DAsync(encUV, encUVPitch, (void*)(interpPtr + yBytes), interpPitch,
+                                          m_dstW, m_dstH / 2, cudaMemcpyDeviceToDevice, slot.stream);
+
+                        cudaStreamSynchronize(slot.stream);
+                        if (CudaFailed("GPU: FRUC NV12 → encoder NV12 (D2D)"))
+                            break;
+                        if (!m_encoder.SubmitFrame(pts)) {
+                            LogMsg("PIP: ","FRUC interpolated SubmitFrame failed");
+                            if (onError) onError(L"帧插值编码提交失败");
+                            m_state.store(PipelineState::Error);
+                            break;
+                        }
+                    } else {
+                        // CPU fallback: D2D copy FRUC NV12 → slot.d_nv12_out, then D2H
+                        cudaMemcpy2DAsync(slot.d_nv12_out, m_dstW, (void*)interpPtr, interpPitch,
+                                          m_dstW, m_dstH, cudaMemcpyDeviceToDevice, slot.stream);
+                        cudaMemcpy2DAsync(slot.d_nv12_out + yBytes, m_dstW, (void*)(interpPtr + yBytes), interpPitch,
+                                          m_dstW, m_dstH / 2, cudaMemcpyDeviceToDevice, slot.stream);
+
+                        cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
+                                        cudaMemcpyDeviceToHost, slot.stream);
+                        cudaStreamSynchronize(slot.stream);
+                        if (CudaFailed("CPU: FRUC NV12 D2D + D2H"))
+                            break;
+                        if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, pts)) {
+                            LogMsg("PIP: ","FRUC interpolated WriteFrameNV12 failed");
+                            if (onError) onError(L"帧插值编码写入失败");
+                            m_state.store(PipelineState::Error);
+                            break;
+                        }
+                    }
+                    m_framesEncoded.fetch_add(1);
                 }
-                if (!m_encoder.SubmitFrame(encPts)) {
-                    LogMsg("PIP: ","Encode failed (CUDA)");
-                    if (onError) onError(L"编码失败 (CUDA)");
-                    m_state.store(PipelineState::Error);
-                    break;
+
+                // Original
+                {
+                    int64_t pts = (int64_t)m_framesEncoded.load();
+                    char logBuf[128];
+                    snprintf(logBuf, sizeof(logBuf), "FRUC encode original frame seq=%d", (int)pts);
+                    LogMsg("PIP: ", logBuf);
+                    if (!encodeFrame(slot.d_rgba_dst, pts, false)) {
+                        LogMsg("PIP: ","Original encode failed");
+                        if (onError) onError(L"编码失败");
+                        m_state.store(PipelineState::Error);
+                        break;
+                    }
+                    m_framesEncoded.fetch_add(1);
                 }
             } else {
-                // CPU fallback: render to output buffer, D2H, CPU encode
-                int outYStride  = m_trueHdrEnabled ? m_dstW * 2 : m_dstW;
-                int outUVStride = m_trueHdrEnabled ? m_dstW * 2 : m_dstW;
-                size_t yPlaneBytes = outYStride * m_dstH;
-                if (m_trueHdrEnabled) {
-                    launch_abgr10_to_p010(
-                        slot.d_rgba_dst, m_dstW * 4,
-                        slot.d_nv12_out, outYStride,
-                        slot.d_nv12_out + yPlaneBytes, outUVStride,
-                        m_dstW, m_dstH, true, slot.stream);
-                } else {
-                    launch_rgba_to_nv12(
-                        slot.d_rgba_dst, m_dstW * 4,
-                        slot.d_nv12_out, outYStride,
-                        slot.d_nv12_out + yPlaneBytes, outUVStride,
-                        m_dstW, m_dstH, slot.stream, m_colorMatrix);
-                }
-                cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
-                                cudaMemcpyDeviceToHost, slot.stream);
-                cudaStreamSynchronize(slot.stream);
-                if (CudaFailed(m_trueHdrEnabled ? "GPU: ABGR10->P010 + D2H" : "GPU: RGBA->NV12 + D2H")) {
-                    LogMsg("PIP: ","GPU: CUDA error in convert kernel or D2H");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, outYStride, outUVStride, encPts)) {
+                // Single encode per slot (no FRUC)
+                int64_t pts = (int64_t)m_framesEncoded.load();
+                if (!encodeFrame(slot.d_rgba_dst, pts, m_trueHdrEnabled)) {
                     LogMsg("PIP: ","Encode failed");
                     if (onError) onError(L"编码失败");
                     m_state.store(PipelineState::Error);
                     break;
                 }
+                m_framesEncoded.fetch_add(1);
             }
 
-            if (encPts % 500 == 0) {
+            int encoded = m_framesEncoded.load();
+            if (encoded % 500 == 0) {
                 char buf[256];
                 snprintf(buf, sizeof(buf),
-                    "GPU: frame %lld (slot %d) pts=%lld seq=%d state=%d",
-                    (long long)encPts, slotIdx,
-                    (long long)slot.pts, slot.seq.load(),
-                    (int)slot.state.load());
+                    "GPU: frame %d (slot %d) seq=%d",
+                    encoded, slotIdx, slot.seq.load());
                 LogMsg("PIP: ",buf);
             }
         }
@@ -654,7 +741,7 @@ void PipelineController::ThreadFuncImpl() {
         slot.state.store(SlotState::Empty);
         m_slotCv.notify_one();
 
-        int encoded = m_framesEncoded.fetch_add(1) + 1;
+        int encoded = m_framesEncoded.load();
 
         // Progress reporting
         auto now = std::chrono::high_resolution_clock::now();
@@ -662,10 +749,10 @@ void PipelineController::ThreadFuncImpl() {
         if (ms > 0 && onProgress) {
             PipelineProgress p;
             p.currentFrame   = encoded;
-            p.totalFrames    = m_totalFrames;
+            p.totalFrames    = m_totalOutputFrames;
             p.fps            = 1000.0f / ms;
             p.avgMsPerFrame  = ms;
-            p.etaSeconds     = (m_totalFrames - encoded) * ms / 1000.0f;
+            p.etaSeconds     = (m_totalOutputFrames - encoded) * ms / 1000.0f;
             strncpy(p.decodeMode, m_decodeMode, sizeof(p.decodeMode) - 1);
             onProgress(p);
         }
@@ -693,6 +780,7 @@ void PipelineController::ThreadFuncImpl() {
 cleanup:
     LogStatus(onStatus, "清理资源...");
     SafeCleanup(m_encoder, m_vsr, m_decoder);
+    m_frameInterpolator.Shutdown();
 
     for (auto* p : m_audioPackets) {
         if (p) { AVPacket* ap = static_cast<AVPacket*>(p); av_packet_free(&ap); }

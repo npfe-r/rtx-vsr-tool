@@ -22,6 +22,10 @@ set(RTX_SDK_INCLUDE_DIR "${RTX_SDK_DIR}/include")
 set(DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../DLSS-310.6.0")
 set(NGX_CORE_LIB "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
 
+# Optical Flow SDK (NvOFFRUC) — runtime-loaded DLL, no static lib needed
+set(OFA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Optical_Flow_SDK_5.0.7")
+set(OFA_INCLUDE_DIR "${OFA_SDK_DIR}/NvOFFRUC/Interface")
+
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.cu)
 
 # Exclude test sources from the main target
@@ -33,6 +37,7 @@ target_include_directories(RTX_VSR_Tool PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${RTX_SDK_INCLUDE_DIR}
+    ${OFA_INCLUDE_DIR}
 )
 
 # Tell MSVC to treat source files as UTF-8 and emit UTF-8 (fixes Chinese chars)
@@ -72,6 +77,16 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
 # )
 
 # Copy SDK DLLs to output dir
+# NOTE: NvOFFRUC.dll is copied as PRE_BUILD (before compilation) to ensure it exists
+# for any build-time checks; all other DLLs are POST_BUILD.
+add_custom_command(TARGET RTX_VSR_Tool PRE_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OFA_SDK_DIR}/NvOFFRUC/NvOFFRUCSample/bin/win64/NvOFFRUC.dll"
+        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/NvOFFRUC.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OFA_SDK_DIR}/NvOFFRUC/NvOFFRUCSample/bin/win64/cudart64_110.dll"
+        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/cudart64_110.dll"
+)
 add_custom_command(TARGET RTX_VSR_Tool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${RTX_SDK_DIR}/bin/Windows/x64/rel/nvngx_vsr.dll"

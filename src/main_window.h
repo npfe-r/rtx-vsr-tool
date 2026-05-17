@@ -79,6 +79,7 @@ private:
     int     m_thdrSaturation  = 100;
     int     m_thdrMiddleGray  = 50;
     int     m_thdrMaxLuminance = 1000;
+    int     m_frameInterpolation = 0;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]    = {};
     char    m_encoderWarning[256] = {};

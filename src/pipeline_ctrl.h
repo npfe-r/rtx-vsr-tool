@@ -15,6 +15,7 @@
 #include "vsr_processor.h"
 #include "video_encoder.h"
 #include "color_types.h"
+#include "frame_interpolator.h"
 
 extern "C" void launch_nv12_to_rgba(
     const uint8_t* y_plane, int y_pitch,
@@ -56,6 +57,7 @@ struct PipelineConfig {
     int audioMode = 1;
     int audioBitrate = 128;
     bool trueHdrEnabled = false;
+    bool frameInterpolation = false;
     int  thdrContrast    = 100;
     int  thdrSaturation  = 100;
     int  thdrMiddleGray  = 50;
@@ -132,10 +134,13 @@ private:
     int m_srcTimeBaseNum = 1;
     int m_srcTimeBaseDen = 30;
 
-    VideoDecoder   m_decoder;
-    VSRProcessor   m_vsr;
-    VideoEncoder   m_encoder;
+    VideoDecoder      m_decoder;
+    VSRProcessor      m_vsr;
+    VideoEncoder      m_encoder;
+    FrameInterpolator m_frameInterpolator;
 
+    bool m_fiActive = false;
+    int  m_totalOutputFrames = 0;
     std::vector<void*> m_audioPackets;
 
     std::atomic<PipelineState> m_state{PipelineState::Idle};
