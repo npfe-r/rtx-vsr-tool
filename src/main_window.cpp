@@ -543,14 +543,14 @@ void MainWindow::RenderUI()
 
     // Calculate mid section height from settings panel content (no scrollbar)
     // Count of control rows (each uses AlignTextToFramePadding + Text + SameLine + widget)
-    // Rows: GPU, Quality, HDR, FrameInterp, OutputSize, Resolution, FPS, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 13
-    // Separators between groups: after HDR, after FPS, after Container = 3
+    // Rows: GPU, Quality, HDR, FrameInterp, OutputSize, Resolution, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 12
+    // Separators between groups: after HDR, after Resolution, after Container = 3
     float midH;
     {
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        const int nControls   = 13;  // update when adding/removing setting rows
+        const int nControls   = 12;  // update when adding/removing setting rows
         const int nSeparators = 3;
         midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
     }
