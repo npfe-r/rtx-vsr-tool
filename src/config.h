@@ -25,7 +25,7 @@ struct VSRConfig {
     int audioMode = 1;              // 0=no audio, 1=copy source, 2=AAC encode
     int audioBitrate = 128;         // kbps: 64, 96, 128, 192, 256, 320
     int trueHdrEnabled = 0;         // 0=disabled, 1=enabled (TrueHDR / HDR tone mapping)
-    int frameInterpolation = 0;     // 0=off, 1=2x (NvOFFRUC frame interpolation)
+    int frameInterpolation = 0;     // 0=off, 1=2x (RIFE-TRT)
     int frucPosition = 0;           // 0=后插帧(After VSR), 1=前插帧(Before VSR)
     int thdrContrast = 100;         // 0–200
     int thdrSaturation = 100;       // 0–200

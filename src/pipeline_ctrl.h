@@ -15,19 +15,19 @@
 #include "vsr_processor.h"
 #include "video_encoder.h"
 #include "color_types.h"
-#include "frame_interpolator.h"
+#include "frame_interpolator_trt.h"
 
 extern "C" void launch_nv12_to_rgba(
     const uint8_t* y_plane, int y_pitch,
     const uint8_t* uv_plane, int uv_pitch,
     uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix);
+    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange);
 
 extern "C" void launch_rgba_to_nv12(
     const uint8_t* rgba, int rgba_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix);
+    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange);
 
 extern "C" void launch_abgr10_to_p010(
     const uint8_t* abgr10, int abgr10_pitch,
@@ -140,7 +140,7 @@ private:
     VideoDecoder      m_decoder;
     VSRProcessor      m_vsr;
     VideoEncoder      m_encoder;
-    FrameInterpolator m_frameInterpolator;
+    FrameInterpolatorRIFE m_frameInterpolatorRIFE;
 
     bool m_fiActive = false;
     bool m_fiBeforeVsr = false;

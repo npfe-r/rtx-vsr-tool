@@ -117,7 +117,7 @@ void PipelineController::ThreadFunc() {
         m_encoder.ClearStatusCallback();
         __try { m_encoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         __try { m_decoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        __try { m_frameInterpolator.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        __try { m_frameInterpolatorRIFE.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
         m_state.store(PipelineState::Error);
         LogMsg("PIP: ","ThreadFunc SEH handler done");
@@ -209,11 +209,12 @@ void PipelineController::DecodeFunc() {
                     slot.d_rgba_src, m_srcW * 4,
                     m_srcW, m_srcH, m_avColorTransfer, slot.stream);
             } else {
+                // GPU path: NVDEC output range matches source
                 launch_nv12_to_rgba(
                     yDev, yPitch,
                     uvDev, uvPitch,
                     slot.d_rgba_src, m_srcW * 4,
-                    m_srcW, m_srcH, slot.stream, m_colorMatrix);
+                    m_srcW, m_srcH, slot.stream, m_colorMatrix, m_avColorRange);
             }
         } else {
             int stride = m_srcW;
@@ -231,11 +232,12 @@ void PipelineController::DecodeFunc() {
             cudaMemcpyAsync(slot.d_nv12, slot.nv12_cpu, nv12Size,
                             cudaMemcpyHostToDevice, slot.stream);
 
+            // CPU path: swscale already converted to limited range NV12
             launch_nv12_to_rgba(
                 slot.d_nv12, stride,
                 slot.d_nv12 + m_srcW * m_srcH, stride,
                 slot.d_rgba_src, m_srcW * 4,
-                m_srcW, m_srcH, slot.stream, m_colorMatrix);
+                m_srcW, m_srcH, slot.stream, m_colorMatrix, COLOR_RANGE_LIMITED);
         }
 
         cudaStreamSynchronize(slot.stream);
@@ -247,42 +249,29 @@ void PipelineController::DecodeFunc() {
             break;
         }
 
-        // ── 前插帧 (FRUC_before_VSR) ──
+        // ── 前插帧 (RIFE, 解码线程) ──
         if (m_fiBeforeVsr && m_fiActive) {
             double ts = slot.pts >= 0
                 ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
                 : (double)slot.seq.load() / m_srcFps;
 
-            uint64_t interpNV12 = 0;
-            int interpPitch = 0;
+            uint64_t interpRGBA = 0;
             bool frameRepeat = false;
 
-            // ProcessFrameNV12 内部: rgba_to_nv12(默认流) → FRUC → 输出 NV12
-            if (m_frameInterpolator.ProcessFrameNV12(
-                    (uint64_t)slot.d_rgba_src, ts,
-                    interpNV12, interpPitch, frameRepeat)) {
+            if (m_frameInterpolatorRIFE.ProcessFrame(
+                    (uint64_t)slot.d_rgba_src, ts, interpRGBA, frameRepeat)) {
 
-                // 同步 FRUC 默认流 → per-slot 流
                 cudaEventRecord(slot.decodeEvent, 0);
                 cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
 
-                // NV12 → RGBA (per-slot 流) → d_rgba_interp
-                size_t yBytes = (size_t)m_srcW * m_srcH;
-                launch_nv12_to_rgba(
-                    (const uint8_t*)interpNV12, interpPitch,
-                    (const uint8_t*)(interpNV12 + yBytes), interpPitch,
-                    slot.d_rgba_interp, m_srcW * 4,
-                    m_srcW, m_srcH, slot.stream, m_colorMatrix);
-                cudaStreamSynchronize(slot.stream);
-                if (CudaFailed("前插帧 NV12→RGBA")) {
-                    m_state.store(PipelineState::Error);
-                    slot.state.store(SlotState::Empty);
-                    m_slotCv.notify_one();
-                    break;
+                // 拷贝到 d_rgba_interp（同已设计的前插帧架构）
+                if (interpRGBA && slot.d_rgba_interp) {
+                    cuMemcpyDtoD((CUdeviceptr)slot.d_rgba_interp,
+                                 (CUdeviceptr)interpRGBA,
+                                 (size_t)m_srcW * m_srcH * 4);
                 }
                 slot.hasInterp = true;
             }
-            // 首帧: ProcessFrameNV12 返回 false, hasInterp 保持 false
         }
 
         slot.state.store(SlotState::VSR_Ready);
@@ -492,7 +481,7 @@ void PipelineController::ThreadFuncImpl() {
                                 m_cfg.thdrMiddleGray, m_cfg.thdrMaxLuminance);
     }
 
-    // ---- Validate FRUC + TrueHDR compatibility ----
+    // ---- Validate RIFE + TrueHDR compatibility ----
     // 后插帧 (After VSR) + TrueHDR 不兼容，拒绝启动
     if (m_cfg.frameInterpolation && !m_fiBeforeVsr && m_trueHdrEnabled) {
         LogMsg("PIP: ","后插帧与 TrueHDR 不兼容");
@@ -501,23 +490,37 @@ void PipelineController::ThreadFuncImpl() {
         goto cleanup;
     }
 
-    // ---- Init FrameInterpolator (FRUC) ----
+    // ---- 初始化 RIFE 帧插值 ----
     m_fiActive = false;
     m_totalOutputFrames = m_totalFrames;
     if (m_cfg.frameInterpolation && m_cfg.qualityLevel > 0) {
-        LogStatus(onStatus, "初始化帧插值...");
+        LogStatus(onStatus, "初始化 RIFE 帧插值...");
         int frucW = m_fiBeforeVsr ? m_srcW : m_dstW;
         int frucH = m_fiBeforeVsr ? m_srcH : m_dstH;
-        if (m_frameInterpolator.Initialize(frucW, frucH, m_cfg.gpuIndex, m_colorMatrix)) {
+
+        // 构造 ONNX 绝对路径（相对于 exe 目录）
+        char modelPath[MAX_PATH];
+        {
+            wchar_t exeDir[MAX_PATH];
+            GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+            wchar_t* p = wcsrchr(exeDir, L'\\');
+            if (p) *p = L'\0';
+            char dirA[MAX_PATH];
+            WideCharToMultiByte(CP_UTF8, 0, exeDir, -1, dirA, MAX_PATH, NULL, NULL);
+            snprintf(modelPath, sizeof(modelPath),
+                     "%s/models/rife/rife-v4.6/flownet.onnx", dirA);
+        }
+
+        if (m_frameInterpolatorRIFE.Initialize(frucW, frucH, m_cfg.gpuIndex, modelPath)) {
             m_fiActive = true;
-            m_totalOutputFrames = m_frameInterpolator.GetExpectedOutputFrames(m_totalFrames);
+            m_totalOutputFrames = m_frameInterpolatorRIFE.GetExpectedOutputFrames(m_totalFrames);
             outFps = m_srcFps * 2.0;
             char buf[128];
-            snprintf(buf, sizeof(buf), "帧插值已启用 (2x, %s, %dx%d)",
+            snprintf(buf, sizeof(buf), "RIFE 帧插值已启用 (2x, %s, %dx%d)",
                      m_fiBeforeVsr ? "前插帧" : "后插帧", frucW, frucH);
             LogStatus(onStatus, buf);
         } else {
-            LogStatus(onStatus, "帧插值初始化失败，将不使用");
+            LogStatus(onStatus, "RIFE 帧插值初始化失败，将不使用");
         }
     }
 
@@ -676,7 +679,7 @@ void PipelineController::ThreadFuncImpl() {
                         launch_rgba_to_nv12(
                             rgba_src, m_dstW * 4,
                             encY, encYPitch, encUV, encUVPitch,
-                            m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                            m_dstW, m_dstH, slot.stream, m_colorMatrix, m_avColorRange);
                     }
                     cudaStreamSynchronize(slot.stream);
                     if (CudaFailed(hdr ? "GPU: ABGR10->P010 (CUDA enc)" : "GPU: RGBA->NV12 (CUDA enc)"))
@@ -699,7 +702,7 @@ void PipelineController::ThreadFuncImpl() {
                             rgba_src, m_dstW * 4,
                             slot.d_nv12_out, outYStride,
                             slot.d_nv12_out + yPlaneBytes, outUVStride,
-                            m_dstW, m_dstH, slot.stream, m_colorMatrix);
+                            m_dstW, m_dstH, slot.stream, m_colorMatrix, m_avColorRange);
                     }
                     cudaMemcpyAsync(slot.nv12_out_cpu, slot.d_nv12_out, outSize,
                                     cudaMemcpyDeviceToHost, slot.stream);
@@ -759,7 +762,7 @@ void PipelineController::ThreadFuncImpl() {
                 m_framesEncoded.fetch_add(1);
 
             } else if (m_fiActive && !m_fiBeforeVsr) {
-                // ── 后插帧: 1 轮 VSR + FRUC NV12 直通 ──
+                // ── 后插帧: VSR → RIFE → 编码 ──
                 vsrCtx.src = slot.d_rgba_src;
                 if (!SafeVSRProcess(&vsrCtx)) {
                     LogMsg("PIP: ","VSR evaluate failed or crashed");
@@ -770,67 +773,36 @@ void PipelineController::ThreadFuncImpl() {
                 cudaEventRecord(slot.vsrEvent, 0);
                 cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
 
-                // FRUC 后插帧编码 (从 d_rgba_dst 产 2 帧)
                 double ts = slot.pts >= 0
                     ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
                     : (double)slot.seq.load() / m_srcFps;
 
-                uint64_t interpPtr = 0;
-                int interpPitch = 0;
+                uint64_t interpRGBA = 0;
                 bool frameRepeat = false;
-                if (m_frameInterpolator.ProcessFrameNV12(
-                        (uint64_t)slot.d_rgba_dst, ts,
-                        interpPtr, interpPitch, frameRepeat)) {
-                    int64_t interpPts = (int64_t)m_framesEncoded.load();
-                    char logBuf[128];
-                    snprintf(logBuf, sizeof(logBuf), "FRUC encode interpolated frame seq=%d repeat=%d", (int)interpPts, (int)frameRepeat);
-                    LogMsg("PIP: ", logBuf);
 
-                    size_t yBytes = (size_t)m_dstW * m_dstH;
-                    uint8_t* encY = nullptr;
-                    uint8_t* encUV = nullptr;
-                    int encYPitch = 0, encUVPitch = 0;
-                    if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
-                        cudaMemcpy2DAsync(encY, encYPitch, (void*)interpPtr, interpPitch,
-                                          m_dstW, m_dstH, cudaMemcpyDeviceToDevice, slot.stream);
-                        cudaMemcpy2DAsync(encUV, encUVPitch, (void*)(interpPtr + yBytes), interpPitch,
-                                          m_dstW, m_dstH / 2, cudaMemcpyDeviceToDevice, slot.stream);
-                        cudaStreamSynchronize(slot.stream);
-                        if (CudaFailed("GPU: FRUC NV12 → encoder NV12 (D2D)"))
-                            break;
-                        if (!m_encoder.SubmitFrame(interpPts)) {
-                            LogMsg("PIP: ","FRUC interpolated SubmitFrame failed");
-                            if (onError) onError(L"帧插值编码提交失败");
-                            m_state.store(PipelineState::Error);
-                            break;
-                        }
-                    } else {
-                        cudaMemcpyAsync(slot.nv12_out_cpu, (void*)interpPtr, outSize,
-                                        cudaMemcpyDeviceToHost, slot.stream);
-                        cudaStreamSynchronize(slot.stream);
-                        if (CudaFailed("CPU: FRUC NV12 D2H"))
-                            break;
-                        if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, interpPts)) {
-                            LogMsg("PIP: ","FRUC interpolated WriteFrameNV12 failed");
-                            if (onError) onError(L"帧插值编码写入失败");
-                            m_state.store(PipelineState::Error);
-                            break;
-                        }
+                if (m_frameInterpolatorRIFE.ProcessFrame(
+                        (uint64_t)slot.d_rgba_dst, ts, interpRGBA, frameRepeat)) {
+
+                    cudaStreamSynchronize(0);  // 同步 RIFE 默认流
+
+                    // 编码插值帧
+                    int64_t interpPts = m_framesEncoded.load();
+                    if (!encodeFrame((const uint8_t*)interpRGBA, interpPts, false)) {
+                        if (onError) onError(L"RIFE 插值帧编码失败");
+                        m_state.store(PipelineState::Error); break;
                     }
                     m_framesEncoded.fetch_add(1);
                 }
 
-                // 原始帧: encode
-                if (!encodeFrame(slot.d_rgba_dst, (int64_t)m_framesEncoded.load(), false)) {
-                    LogMsg("PIP: ","Original encode failed");
-                    if (onError) onError(L"编码失败");
-                    m_state.store(PipelineState::Error);
-                    break;
+                // 编码原始帧
+                if (!encodeFrame(slot.d_rgba_dst, m_framesEncoded.load(), m_trueHdrEnabled)) {
+                    if (onError) onError(L"原始帧编码失败");
+                    m_state.store(PipelineState::Error); break;
                 }
                 m_framesEncoded.fetch_add(1);
 
             } else {
-                // ── 无 FRUC: 单轮 VSR + encode ──
+                // ── 无 RIFE: 单轮 VSR + encode ──
                 vsrCtx.src = slot.d_rgba_src;
                 if (!SafeVSRProcess(&vsrCtx)) {
                     LogMsg("PIP: ","VSR evaluate failed or crashed");
@@ -903,7 +875,7 @@ void PipelineController::ThreadFuncImpl() {
 cleanup:
     LogStatus(onStatus, "清理资源...");
     SafeCleanup(m_encoder, m_vsr, m_decoder);
-    m_frameInterpolator.Shutdown();
+    m_frameInterpolatorRIFE.Shutdown();
 
     for (auto* p : m_audioPackets) {
         if (p) { AVPacket* ap = static_cast<AVPacket*>(p); av_packet_free(&ap); }
