@@ -67,6 +67,8 @@ private:
     bool m_hasPrev = false;         // 是否有上一帧缓存
     int  m_width  = 0;
     int  m_height = 0;
+    int  m_alignedW = 0;            // 对齐到 32 的宽度 (RIFE 要求)
+    int  m_alignedH = 0;            // 对齐到 32 的高度
     int  m_gpuIndex = 0;
     bool m_initialized = false;
     bool m_engineReady = false;

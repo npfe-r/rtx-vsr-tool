@@ -51,6 +51,9 @@ bool FrameInterpolatorRIFE::Initialize(
 {
     Shutdown();
     m_width = width; m_height = height; m_gpuIndex = gpuIndex;
+    // RIFE 模型要求输入尺寸能被 32 整除
+    m_alignedW = ((width  + 31) / 32) * 32;
+    m_alignedH = ((height + 31) / 32) * 32;
 
     if (!IsModelPresent(onnxModelPath)) {
         char b[512]; snprintf(b, sizeof(b), "ONNX 模型未找到: %s", onnxModelPath);
@@ -66,10 +69,10 @@ bool FrameInterpolatorRIFE::Initialize(
     // TensorRT engine
     if (!LoadOrBuildEngine(onnxModelPath)) { Shutdown(); return false; }
 
-    // 分配 GPU 内存
-    size_t rgba4sz  = (size_t)width * height * 4;
-    size_t rgb6ch   = (size_t)width * height * 6 * sizeof(float);
-    size_t rgb3ch   = (size_t)width * height * 3 * sizeof(float);
+    // 分配 GPU 内存（使用对齐到 32 的尺寸）
+    size_t rgba4sz  = (size_t)m_alignedW * m_alignedH * 4;
+    size_t rgb6ch   = (size_t)m_alignedW * m_alignedH * 6 * sizeof(float);
+    size_t rgb3ch   = (size_t)m_alignedW * m_alignedH * 3 * sizeof(float);
 
     auto cuAlloc = [](uint64_t& p, size_t sz) -> bool {
         return (sz == 0) || (cuMemAlloc((CUdeviceptr*)&p, sz) == CUDA_SUCCESS);
@@ -136,17 +139,18 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     for (int i = 0; i < net->getNbOutputs(); i++)
         m_outputName = net->getOutput(i)->getName();
 
-    // 设置输入维度
-    net->getInput(0)->setDimensions(Dims4{1, 6, m_height, m_width});
+    // 设置输入维度（对齐到 32）
+    int aw = m_alignedW, ah = m_alignedH;
+    net->getInput(0)->setDimensions(Dims4{1, 6, ah, aw});
 
-    // 优化 profile (固定尺寸)
+    // 优化 profile (固定尺寸，对齐到 32)
     IOptimizationProfile* profile = builder->createOptimizationProfile();
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kMIN,
-                           Dims4(1, 6, m_height, m_width));
+                           Dims4(1, 6, ah, aw));
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kOPT,
-                           Dims4(1, 6, m_height, m_width));
+                           Dims4(1, 6, ah, aw));
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kMAX,
-                           Dims4(1, 6, m_height, m_width));
+                           Dims4(1, 6, ah, aw));
 
     IBuilderConfig* cfg = builder->createBuilderConfig();
     cfg->addOptimizationProfile(profile);
@@ -205,7 +209,10 @@ bool FrameInterpolatorRIFE::ProcessFrame(
         return false;
     }
 
-    // Step 1: prev RGBA → RGB float (6ch 前 3ch)
+    // 清零 6ch 浮点输入（填充区保持 0）
+    cuMemsetD8((CUdeviceptr)m_rgbFloat6ch, 0, (size_t)m_alignedW * m_alignedH * 6 * sizeof(float));
+
+    // Step 1: prev RGBA → RGB float (6ch 前 3ch, 仅有效区域)
     launch_rgba_to_rgb_float(
         (const uint8_t*)m_prevRgba, m_width * 4,
         (float*)m_rgbFloat6ch, m_width, m_height, 0, 0);
