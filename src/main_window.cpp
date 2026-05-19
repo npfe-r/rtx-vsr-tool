@@ -819,7 +819,7 @@ void MainWindow::RenderUI()
     }
     if (m_isRunning) ImGui::EndDisabled();
 
-    // Frame Interpolation (2x FRUC)
+    // Frame Interpolation (2x RIFE)
     ImGui::AlignTextToFramePadding();
     ImGui::Text("帧插值");
     ImGui::SameLine(labelW);
@@ -831,11 +831,11 @@ void MainWindow::RenderUI()
             m_frameInterpolation = fiOn ? 1 : 0;
         }
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "2x FRUC");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "2x RIFE");
         if (fiDisabled) ImGui::EndDisabled();
     }
 
-    // ── FRUC 执行位置下拉 (FRUC 启用时可选) ──
+    // ── RIFE 执行位置下拉 (RIFE 启用时可选) ──
     if (m_frameInterpolation) {
         ImGui::Indent(16.0f);
 
