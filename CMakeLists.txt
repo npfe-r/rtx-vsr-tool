@@ -112,4 +112,8 @@ add_custom_command(TARGET RTX_VSR_Tool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${FFMPEG_DIR}/bin/swresample-6.dll"
         "$<TARGET_FILE_DIR:RTX_VSR_Tool>/swresample-6.dll"
+    # Copy RIFE ONNX model to output dir
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/models/rife/rife-v4.6/rife_v4.6.onnx"
+        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/rife_v4.6.onnx"
 )
