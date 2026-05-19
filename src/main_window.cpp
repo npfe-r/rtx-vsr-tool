@@ -670,7 +670,7 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d", outW, outH);
 
-        // Output FPS (FRUC doubles the output frame rate)
+        // Output FPS (RIFE doubles the output frame rate)
         double outFps = m_videoInfo.fps;
         if (m_frameInterpolation) outFps *= 2.0;
         ImGui::Text("帧率");
@@ -683,7 +683,7 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
 
-        // Estimate output frame count (×2 with FRUC)
+        // Estimate output frame count (×2 with RIFE)
         int outFrames = m_videoInfo.totalFrames;
         if (m_frameInterpolation) outFrames = outFrames * 2 - 1;
         ImGui::Text("帧数");
