@@ -109,7 +109,6 @@ void PipelineController::ThreadFunc() {
             if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
             if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
             if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
-            if (m_slots[i].d_rgba_interp) cudaFree(m_slots[i].d_rgba_interp);
             if (m_slots[i].decodeEvent)  cudaEventDestroy(m_slots[i].decodeEvent);
             if (m_slots[i].vsrEvent)     cudaEventDestroy(m_slots[i].vsrEvent);
             if (m_slots[i].stream)       cudaStreamDestroy(m_slots[i].stream);
@@ -117,7 +116,6 @@ void PipelineController::ThreadFunc() {
         m_encoder.ClearStatusCallback();
         __try { m_encoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         __try { m_decoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        __try { m_frameInterpolatorRIFE.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         if (onError) onError(L"管道线程异常崩溃，请查看 pipeline_debug.log");
         m_state.store(PipelineState::Error);
         LogMsg("PIP: ","ThreadFunc SEH handler done");
@@ -177,7 +175,6 @@ void PipelineController::DecodeFunc() {
 
         FrameSlot& slot = m_slots[slotIdx];
         slot.seq = decFrameIdx;
-        slot.hasInterp = false;
 
         bool useGPU = m_decoder.IsHWDecoding();
         if (useGPU) {
@@ -247,31 +244,6 @@ void PipelineController::DecodeFunc() {
             slot.state.store(SlotState::Empty);
             m_slotCv.notify_one();
             break;
-        }
-
-        // ── 前插帧 (RIFE, 解码线程) ──
-        if (m_fiBeforeVsr && m_fiActive) {
-            double ts = slot.pts >= 0
-                ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
-                : (double)slot.seq.load() / m_srcFps;
-
-            uint64_t interpRGBA = 0;
-            bool frameRepeat = false;
-
-            if (m_frameInterpolatorRIFE.ProcessFrame(
-                    (uint64_t)slot.d_rgba_src, ts, interpRGBA, frameRepeat)) {
-
-                cudaEventRecord(slot.decodeEvent, 0);
-                cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
-
-                // 拷贝到 d_rgba_interp（同已设计的前插帧架构）
-                if (interpRGBA && slot.d_rgba_interp) {
-                    cuMemcpyDtoD((CUdeviceptr)slot.d_rgba_interp,
-                                 (CUdeviceptr)interpRGBA,
-                                 (size_t)m_srcW * m_srcH * 4);
-                }
-                slot.hasInterp = true;
-            }
         }
 
         slot.state.store(SlotState::VSR_Ready);
@@ -352,7 +324,6 @@ void PipelineController::ThreadFuncImpl() {
 
     // Store pipeline flags
     m_trueHdrEnabled = m_cfg.trueHdrEnabled;
-    m_fiBeforeVsr = (m_cfg.frucPosition == 1);
 
     // Store source colour metadata
     m_colorMatrix       = info.srcColorMatrix;
@@ -381,12 +352,11 @@ void PipelineController::ThreadFuncImpl() {
     }
 
     CalculateOutputSize(m_srcW, m_srcH, m_dstW, m_dstH);
-    double outFps = m_srcFps;
 
     {
         char buf[256];
         snprintf(buf, sizeof(buf), "Output: %dx%d fps=%.3f quality=%d encoder=%d crf=%d speed=%d",
-            m_dstW, m_dstH, outFps, m_cfg.qualityLevel, m_cfg.encoderIndex, m_cfg.crf, m_cfg.encoderSpeed);
+            m_dstW, m_dstH, m_srcFps, m_cfg.qualityLevel, m_cfg.encoderIndex, m_cfg.crf, m_cfg.encoderSpeed);
         LogMsg("PIP: ",buf);
     }
 
@@ -426,16 +396,6 @@ void PipelineController::ThreadFuncImpl() {
             if (onError) onError(L"GPU 内存分配失败，请检查显存");
             m_state.store(PipelineState::Error);
             goto cleanup;
-        }
-
-        // 前插帧: 分配源分辨率 RGBA 插值帧缓冲区
-        if (m_fiBeforeVsr) {
-            if (cudaMalloc(&m_slots[i].d_rgba_interp, rgbaSrcSize) != cudaSuccess) {
-                LogMsg("PIP: ","Failed to allocate d_rgba_interp");
-                if (onError) onError(L"GPU 内存分配失败");
-                m_state.store(PipelineState::Error);
-                goto cleanup;
-            }
         }
 
         // Non-blocking per-slot streams for GPU kernel overlap
@@ -481,58 +441,6 @@ void PipelineController::ThreadFuncImpl() {
                                 m_cfg.thdrMiddleGray, m_cfg.thdrMaxLuminance);
     }
 
-    // ---- Validate RIFE + TrueHDR compatibility ----
-    // 后插帧 (After VSR) + TrueHDR 不兼容，拒绝启动
-    if (m_cfg.frameInterpolation && !m_fiBeforeVsr && m_trueHdrEnabled) {
-        LogMsg("PIP: ","后插帧与 TrueHDR 不兼容");
-        if (onError) onError(L"后插帧与 TrueHDR 不兼容，请选择前插帧或关闭 TrueHDR");
-        m_state.store(PipelineState::Error);
-        goto cleanup;
-    }
-
-    // ---- 初始化 RIFE 帧插值 ----
-    m_fiActive = false;
-    m_totalOutputFrames = m_totalFrames;
-    if (m_cfg.frameInterpolation && m_cfg.qualityLevel > 0) {
-        LogStatus(onStatus, "初始化 RIFE 帧插值...");
-        int frucW = m_fiBeforeVsr ? m_srcW : m_dstW;
-        int frucH = m_fiBeforeVsr ? m_srcH : m_dstH;
-
-        // 构造 ONNX 路径: exe 同级（POST_BUILD 自动拷贝）
-        char modelPath[MAX_PATH];
-        {
-            wchar_t exeDir[MAX_PATH];
-            GetModuleFileNameW(NULL, exeDir, MAX_PATH);
-            wchar_t* p = wcsrchr(exeDir, L'\\');
-            if (p) *p = L'\0';
-            char dirA[MAX_PATH];
-            WideCharToMultiByte(CP_UTF8, 0, exeDir, -1, dirA, MAX_PATH, NULL, NULL);
-            snprintf(modelPath, sizeof(modelPath), "%s/rife_v4.6.onnx", dirA);
-        }
-
-        if (m_frameInterpolatorRIFE.Initialize(frucW, frucH, m_cfg.gpuIndex, modelPath)) {
-            m_fiActive = true;
-            m_totalOutputFrames = m_frameInterpolatorRIFE.GetExpectedOutputFrames(m_totalFrames);
-            outFps = m_srcFps * 2.0;
-            char buf[128];
-            snprintf(buf, sizeof(buf), "RIFE 帧插值已启用 (2x, %s, %dx%d)",
-                     m_fiBeforeVsr ? "前插帧" : "后插帧", frucW, frucH);
-            LogStatus(onStatus, buf);
-        } else {
-            LogStatus(onStatus, "RIFE 帧插值初始化失败");
-            {
-                char errMsg[512];
-                snprintf(errMsg, sizeof(errMsg), "RIFE 帧插值初始化失败：%s",
-                         m_frameInterpolatorRIFE.GetLastError());
-                wchar_t wbuf[512];
-                MultiByteToWideChar(CP_UTF8, 0, errMsg, -1, wbuf, 512);
-                if (onError) onError(wbuf);
-            }
-            m_state.store(PipelineState::Error);
-            goto cleanup;
-        }
-    }
-
     // ---- Open encoder ----
     LogStatus(onStatus, "打开编码器...");
     {
@@ -542,7 +450,7 @@ void PipelineController::ThreadFuncImpl() {
         encCfg.outputPath    = outputPath;
         encCfg.width         = m_dstW;
         encCfg.height        = m_dstH;
-        encCfg.fps           = outFps;
+        encCfg.fps           = m_srcFps;
         encCfg.codecId       = m_cfg.encoderIndex;
         encCfg.crf           = m_cfg.crf;
         encCfg.speed         = m_cfg.encoderSpeed;
@@ -730,106 +638,24 @@ void PipelineController::ThreadFuncImpl() {
             vsrCtx.dstW = m_dstW;
             vsrCtx.dstH = m_dstH;
 
-            if (slot.hasInterp) {
-                // ── 前插帧: 2 轮 VSR ──
-                int64_t pts = (int64_t)m_framesEncoded.load();
-
-                // 第 1 轮: 插值帧 RGBA → VSR → encode
-                vsrCtx.src = slot.d_rgba_interp;
-                if (!SafeVSRProcess(&vsrCtx)) {
-                    LogMsg("PIP: ","VSR evaluate failed or crashed (interp)");
-                    if (onError) onError(L"VSR 处理失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                cudaEventRecord(slot.vsrEvent, 0);
-                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
-                if (!encodeFrame(slot.d_rgba_dst, pts, m_trueHdrEnabled)) {
-                    LogMsg("PIP: ","Encode failed (interp)");
-                    if (onError) onError(L"编码失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                m_framesEncoded.fetch_add(1);
-
-                // 第 2 轮: 原始帧 RGBA → VSR → encode
-                vsrCtx.src = slot.d_rgba_src;
-                if (!SafeVSRProcess(&vsrCtx)) {
-                    LogMsg("PIP: ","VSR evaluate failed or crashed (original)");
-                    if (onError) onError(L"VSR 处理失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                cudaEventRecord(slot.vsrEvent, 0);
-                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
-                if (!encodeFrame(slot.d_rgba_dst, pts + 1, m_trueHdrEnabled)) {
-                    LogMsg("PIP: ","Encode failed (original)");
-                    if (onError) onError(L"编码失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                m_framesEncoded.fetch_add(1);
-
-            } else if (m_fiActive && !m_fiBeforeVsr) {
-                // ── 后插帧: VSR → RIFE → 编码 ──
-                vsrCtx.src = slot.d_rgba_src;
-                if (!SafeVSRProcess(&vsrCtx)) {
-                    LogMsg("PIP: ","VSR evaluate failed or crashed");
-                    if (onError) onError(L"VSR 处理失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                cudaEventRecord(slot.vsrEvent, 0);
-                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
-
-                double ts = slot.pts >= 0
-                    ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
-                    : (double)slot.seq.load() / m_srcFps;
-
-                uint64_t interpRGBA = 0;
-                bool frameRepeat = false;
-
-                if (m_frameInterpolatorRIFE.ProcessFrame(
-                        (uint64_t)slot.d_rgba_dst, ts, interpRGBA, frameRepeat)) {
-
-                    cudaStreamSynchronize(0);  // 同步 RIFE 默认流
-
-                    // 编码插值帧
-                    int64_t interpPts = m_framesEncoded.load();
-                    if (!encodeFrame((const uint8_t*)interpRGBA, interpPts, false)) {
-                        if (onError) onError(L"RIFE 插值帧编码失败");
-                        m_state.store(PipelineState::Error); break;
-                    }
-                    m_framesEncoded.fetch_add(1);
-                }
-
-                // 编码原始帧
-                if (!encodeFrame(slot.d_rgba_dst, m_framesEncoded.load(), m_trueHdrEnabled)) {
-                    if (onError) onError(L"原始帧编码失败");
-                    m_state.store(PipelineState::Error); break;
-                }
-                m_framesEncoded.fetch_add(1);
-
-            } else {
-                // ── 无 RIFE: 单轮 VSR + encode ──
-                vsrCtx.src = slot.d_rgba_src;
-                if (!SafeVSRProcess(&vsrCtx)) {
-                    LogMsg("PIP: ","VSR evaluate failed or crashed");
-                    if (onError) onError(L"VSR 处理失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                cudaEventRecord(slot.vsrEvent, 0);
-                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
-
-                if (!encodeFrame(slot.d_rgba_dst, (int64_t)m_framesEncoded.load(), m_trueHdrEnabled)) {
-                    LogMsg("PIP: ","Encode failed");
-                    if (onError) onError(L"编码失败");
-                    m_state.store(PipelineState::Error);
-                    break;
-                }
-                m_framesEncoded.fetch_add(1);
+            // ── VSR + encode ──
+            vsrCtx.src = slot.d_rgba_src;
+            if (!SafeVSRProcess(&vsrCtx)) {
+                LogMsg("PIP: ","VSR evaluate failed or crashed");
+                if (onError) onError(L"VSR 处理失败");
+                m_state.store(PipelineState::Error);
+                break;
             }
+            cudaEventRecord(slot.vsrEvent, 0);
+            cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
+
+            if (!encodeFrame(slot.d_rgba_dst, (int64_t)m_framesEncoded.load(), m_trueHdrEnabled)) {
+                LogMsg("PIP: ","Encode failed");
+                if (onError) onError(L"编码失败");
+                m_state.store(PipelineState::Error);
+                break;
+            }
+            m_framesEncoded.fetch_add(1);
 
             int encoded = m_framesEncoded.load();
             if (encoded % 500 == 0) {
@@ -853,10 +679,10 @@ void PipelineController::ThreadFuncImpl() {
         if (ms > 0 && onProgress) {
             PipelineProgress p;
             p.currentFrame   = encoded;
-            p.totalFrames    = m_totalOutputFrames;
+            p.totalFrames    = m_totalFrames;
             p.fps            = 1000.0f / ms;
             p.avgMsPerFrame  = ms;
-            p.etaSeconds     = (m_totalOutputFrames - encoded) * ms / 1000.0f;
+            p.etaSeconds     = (m_totalFrames - encoded) * ms / 1000.0f;
             strncpy(p.decodeMode, m_decodeMode, sizeof(p.decodeMode) - 1);
             onProgress(p);
         }
@@ -884,7 +710,6 @@ void PipelineController::ThreadFuncImpl() {
 cleanup:
     LogStatus(onStatus, "清理资源...");
     SafeCleanup(m_encoder, m_vsr, m_decoder);
-    m_frameInterpolatorRIFE.Shutdown();
 
     for (auto* p : m_audioPackets) {
         if (p) { AVPacket* ap = static_cast<AVPacket*>(p); av_packet_free(&ap); }
@@ -899,9 +724,8 @@ cleanup:
         if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
         if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
         if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
-        if (m_slots[i].d_rgba_interp) cudaFree(m_slots[i].d_rgba_interp);
         m_slots[i].d_rgba_src = m_slots[i].d_rgba_dst = nullptr;
-        m_slots[i].d_nv12 = m_slots[i].d_nv12_out = m_slots[i].d_rgba_interp = nullptr;
+        m_slots[i].d_nv12 = m_slots[i].d_nv12_out = nullptr;
         if (m_slots[i].decodeEvent) { cudaEventDestroy(m_slots[i].decodeEvent); m_slots[i].decodeEvent = nullptr; }
         if (m_slots[i].vsrEvent) { cudaEventDestroy(m_slots[i].vsrEvent); m_slots[i].vsrEvent = nullptr; }
         if (m_slots[i].stream) { cudaStreamDestroy(m_slots[i].stream); m_slots[i].stream = nullptr; }

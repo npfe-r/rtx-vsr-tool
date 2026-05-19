@@ -341,7 +341,6 @@ LRESULT MainWindow::OnMessage(UINT msg, WPARAM wParam, LPARAM lParam)
             }
 
             double outVidFps = m_videoInfo.fps;
-            if (m_frameInterpolation) outVidFps *= 2.0;
 
             snprintf(m_statusText, sizeof(m_statusText),
                      "帧 %d/%d  |  FPS: %.1f  |  输出 %.0ffps  |  剩余: %.0fs",
@@ -543,16 +542,18 @@ void MainWindow::RenderUI()
 
     // Calculate mid section height from settings panel content (no scrollbar)
     // Count of control rows (each uses AlignTextToFramePadding + Text + SameLine + widget)
-    // Rows: GPU, Quality, HDR, FrameInterp, OutputSize, Resolution, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 12
+    // Rows: GPU, Quality, HDR, OutputSize, Resolution, Encoder, CRF, Speed, Container, AudioMode, AudioBitrate = 10
     // Separators between groups: after HDR, after Resolution, after Container = 3
     float midH;
     {
         float itemH = ImGui::GetFrameHeightWithSpacing();
         float sepH  = ImGui::GetStyle().ItemSpacing.y;
         float padY  = ImGui::GetStyle().WindowPadding.y;
-        const int nControls   = 12;  // update when adding/removing setting rows
+        const int nControls   = 10;  // update when adding/removing setting rows
         const int nSeparators = 3;
-        midH = nControls * itemH + nSeparators * sepH + padY * 2.0f;
+        // Separator overhead: ImGui::Separator() ≈ sepH * 2 + 2px (spacing + line + spacing)
+        float sepOverhead = nSeparators * (sepH * 2.0f + 2.0f);
+        midH = nControls * itemH + sepOverhead + padY * 2.0f;
     }
 
     // Background vertical divider
@@ -670,9 +671,8 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d x %d", outW, outH);
 
-        // Output FPS (RIFE doubles the output frame rate)
+        // Output FPS
         double outFps = m_videoInfo.fps;
-        if (m_frameInterpolation) outFps *= 2.0;
         ImGui::Text("帧率");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%.2f fps", outFps);
@@ -683,9 +683,8 @@ void MainWindow::RenderUI()
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
 
-        // Estimate output frame count (×2 with RIFE)
+        // Output frame count
         int outFrames = m_videoInfo.totalFrames;
-        if (m_frameInterpolation) outFrames = outFrames * 2 - 1;
         ImGui::Text("帧数");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%d", outFrames);
@@ -819,49 +818,6 @@ void MainWindow::RenderUI()
     }
     if (m_isRunning) ImGui::EndDisabled();
 
-    // Frame Interpolation (2x RIFE)
-    ImGui::AlignTextToFramePadding();
-    ImGui::Text("帧插值");
-    ImGui::SameLine(labelW);
-    {
-        bool fiOn = (m_frameInterpolation != 0);
-        bool fiDisabled = m_isRunning;
-        if (fiDisabled) ImGui::BeginDisabled();
-        if (ImGui::Checkbox("##fi", &fiOn)) {
-            m_frameInterpolation = fiOn ? 1 : 0;
-        }
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "2x RIFE");
-        if (fiDisabled) ImGui::EndDisabled();
-    }
-
-    // ── RIFE 执行位置下拉 (RIFE 启用时可选) ──
-    if (m_frameInterpolation) {
-        ImGui::Indent(16.0f);
-
-        // TrueHDR 启用时自动切换到前插帧（后插帧不兼容）
-        if (m_trueHdrEnabled && m_frucPosition == 0) {
-            m_frucPosition = 1;
-        }
-
-        const char* frucItems[] = {
-            "后插帧 (After VSR)",
-            "前插帧 (Before VSR)    [TrueHDR 兼容]",
-        };
-
-        bool posDisabled = m_isRunning || (m_frucPosition == 0 && m_trueHdrEnabled);
-        if (posDisabled) ImGui::BeginDisabled();
-        if (ImGui::Combo("##frucPos", &m_frucPosition, frucItems, IM_ARRAYSIZE(frucItems))) {
-            // 用户手动选择
-        }
-        if (posDisabled) ImGui::EndDisabled();
-
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "执行位置");
-        ImGui::Unindent(16.0f);
-    }
-    ImGui::Separator();
-
     // TrueHDR parameter popup
     ImGui::SetNextWindowSize(ImVec2(460, 176), ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("TrueHDR 设置", NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
@@ -906,6 +862,7 @@ void MainWindow::RenderUI()
 
         ImGui::EndPopup();
     }
+    ImGui::Separator();
 
     // Output Size
     ImGui::AlignTextToFramePadding();
@@ -1357,8 +1314,6 @@ void MainWindow::OnStartStop()
         pc.audioMode = m_audioMode;
         pc.audioBitrate = m_audioBitrate;
         pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
-        pc.frameInterpolation = (m_frameInterpolation != 0);
-        pc.frucPosition = m_frucPosition;
         pc.thdrContrast    = m_thdrContrast;
         pc.thdrSaturation  = m_thdrSaturation;
         pc.thdrMiddleGray  = m_thdrMiddleGray;
@@ -1504,8 +1459,6 @@ void MainWindow::LoadConfigToUI()
     m_thdrSaturation    = cfg.thdrSaturation;
     m_thdrMiddleGray    = cfg.thdrMiddleGray;
     m_thdrMaxLuminance  = cfg.thdrMaxLuminance;
-    m_frameInterpolation = cfg.frameInterpolation;
-    m_frucPosition = cfg.frucPosition;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -1531,6 +1484,4 @@ void MainWindow::SaveUIToConfig()
     cfg.thdrSaturation  = m_thdrSaturation;
     cfg.thdrMiddleGray  = m_thdrMiddleGray;
     cfg.thdrMaxLuminance = m_thdrMaxLuminance;
-    cfg.frameInterpolation = m_frameInterpolation;
-    cfg.frucPosition = m_frucPosition;
 }

@@ -23,8 +23,9 @@ static int AvColorSpaceToMatrix(int avCS) {
         case 1:  // AVCOL_SPC_BT709
             return COLOR_MATRIX_BT709;
         case 9:  // AVCOL_SPC_BT2020_NCL
-        case 10: // AVCOL_SPC_BT2020_CL
-            return COLOR_MATRIX_BT2020;
+            return COLOR_MATRIX_BT2020_NCL;
+        case 10: // AVCOL_SPC_BT2020_CL (Constant Luminance)
+            return COLOR_MATRIX_BT2020_CL;
         default:
             return COLOR_MATRIX_BT709;  // safe default for modern content
     }
@@ -243,11 +244,13 @@ bool VideoDecoder::Open(const wchar_t* path, VideoInfo* info, bool useGPU) {
     info->avColorRange     = m->decCtx->color_range;
     info->srcColorMatrix   = AvColorSpaceToMatrix(m->decCtx->colorspace);
     {
+        const char* clSuffix = "";
+        if (m->decCtx->colorspace == 10) clSuffix = " (BT.2020 CL — using CL coefficients)";
         char _b[256]; snprintf(_b, sizeof(_b),
-            "DEC: color: primaries=%d transfer=%d space=%d range=%d  → matrix=%d",
+            "DEC: color: primaries=%d transfer=%d space=%d range=%d  → matrix=%d%s",
             info->avColorPrimaries, info->avColorTransfer,
             info->avColorSpace, info->avColorRange,
-            AvColorSpaceToMatrix(info->avColorSpace));
+            AvColorSpaceToMatrix(info->avColorSpace), clSuffix);
         LogMsg("DEC: ",_b);
     }
 

@@ -3,6 +3,7 @@
 #include "color_types.h"
 
 // ── Colour-matrix coefficient tables (device-accessible) ────────────
+//
 // Forward RGB→YUV (limited range):
 //   Y = (yr*R + yg*G + yb*B + 128) >> 8 + yOff
 //   U = (cbr*R + cbg*G + cbb*B + 128) >> 8 + 128
@@ -10,10 +11,14 @@
 // ──────────────────────────────────────────────────────────
 #define FWD(YR,YG,YB, CBR,CBG,CBB, CRR,CRG,CRB, YO) \
     { YR, YG, YB, CBR, CBG, CBB, CRR, CRG, CRB, YO }
-__device__ static const int RGB2YUV[3][10] = {
+
+// Limited-range colour matrices (Y: 16-235, Cb/Cr: 16-240)
+// Indexed by ColorMatrix enum (COLOR_MATRIX_BT601=0, BT709=1, BT2020_NCL=2, BT2020_CL=3)
+__device__ static const int RGB2YUV[4][10] = {
     FWD( 66, 129,  25,  -38, -74, 112,  112, -94, -18,  16 ),  // BT.601
     FWD( 47, 157,  16,  -26, -87, 112,  112,-102, -10,  16 ),  // BT.709
-    FWD( 58, 149,  13,  -31, -81, 112,  112,-103,  -9,  16 ),  // BT.2020
+    FWD( 58, 149,  13,  -31, -81, 112,  112,-103,  -9,  16 ),  // BT.2020 NCL
+    FWD( 58, 149,  13, -498,-1286,1785,  316,-290, -25,  16 ),  // BT.2020 CL
 };
 #undef FWD
 
@@ -23,10 +28,34 @@ __device__ static const int RGB2YUV[3][10] = {
 //   G = (yCoeff*Y' - gu*U' - gv*V' + 128) >> 8
 //   B = (yCoeff*Y' + bu*U'          + 128) >> 8
 // ──────────────────────────────────────────────────────────
-__device__ static const int YUV2RGB[3][6] = {
+__device__ static const int YUV2RGB_LIM[4][6] = {
     { 298, 409, 100, 208, 516, 16 },  // BT.601
     { 298, 459,  55, 136, 541, 16 },  // BT.709
-    { 298, 430,  48, 167, 549, 16 },  // BT.2020
+    { 298, 430,  48, 167, 549, 16 },  // BT.2020 NCL
+    { 298, 153,   3,  59,  35, 16 },  // BT.2020 CL
+};
+
+// ── Full-range colour matrices (Y: 0-255, Cb/Cr: 1-255) ────────────
+// Forward RGB→YUV (full range):
+//   Same layout as above, yOff=0, coefficients include no 219/255 compression
+// ──────────────────────────────────────────────────────────
+#define FWD_FULL(YR,YG,YB, CBR,CBG,CBB, CRR,CRG,CRB) \
+    { YR, YG, YB, CBR, CBG, CBB, CRR, CRG, CRB, 0 }
+
+__device__ static const int RGB2YUV_FULL[3][10] = {
+    FWD_FULL( 77, 150,  29,  -43, -85, 128,  128,-107, -21 ),  // BT.601
+    FWD_FULL( 54, 183,  18,  -29, -99, 128,  128,-116, -12 ),  // BT.709
+    FWD_FULL( 67, 174,  15,  -36, -92, 128,  128,-118, -10 ),  // BT.2020
+};
+#undef FWD_FULL
+
+// Inverse YUV→RGB (full range):
+//   Same layout as YUV2RGB_LIM, yOff=0, yCoeff=256 (no 255/219 scaling)
+// ──────────────────────────────────────────────────────────
+__device__ static const int YUV2RGB_FULL[3][6] = {
+    { 256, 359,  88, 183, 454, 0 },  // BT.601
+    { 256, 403,  48, 120, 475, 0 },  // BT.709
+    { 256, 378,  42, 146, 482, 0 },  // BT.2020
 };
 
 static __device__ __forceinline__ int clamp(int v, int lo, int hi) {
@@ -44,14 +73,17 @@ __global__ void nv12_to_rgba_kernel(
     const uint8_t* y_plane, int y_pitch,
     const uint8_t* uv_plane, int uv_pitch,
     uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, int matrix)
+    int w, int h, int matrix, int srcRange)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
 
-    const int* c = YUV2RGB[matrix];
-    int Y = y_plane[y * y_pitch + x] - c[5];  // yOff
+    // Select coefficient table based on colour range
+    // srcRange: 1=limited, 2=full  (ColorSrcRange enum)
+    int isFull = (srcRange == 2);
+    const int* c = isFull ? YUV2RGB_FULL[matrix] : YUV2RGB_LIM[matrix];
+    int Y = y_plane[y * y_pitch + x] - c[5];  // yOff (0 for full, 16 for limited)
     int U = uv_plane[(y / 2) * uv_pitch + (x & ~1)] - 128;
     int V = uv_plane[(y / 2) * uv_pitch + (x & ~1) + 1] - 128;
 
@@ -74,13 +106,16 @@ __global__ void rgba_to_nv12_kernel(
     const uint8_t* rgba, int rgba_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, int matrix)
+    int w, int h, int matrix, int srcRange)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= w || y >= h) return;
 
-    const int* c = RGB2YUV[matrix];
+    // Select coefficient table based on colour range
+    // srcRange: 1=limited, 2=full  (ColorSrcRange enum)
+    int isFull = (srcRange == 2);
+    const int* c = isFull ? RGB2YUV_FULL[matrix] : RGB2YUV[matrix];
 
     int idx = y * rgba_pitch + x * 4;
     int R = rgba[idx + 0];   // CUDA tex: comp[0] = R
@@ -305,7 +340,7 @@ __global__ void p010_to_rgba_sdr_kernel(
             cs = 12.92f * c;
         else
             cs = 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
-        return (uint8_t)(clamp((int)(cs * 255.0f + 0.5f), 0, 255));
+        return (uint8_t)clamp(lrintf(cs * 255.0f), 0, 255);
     };
 
     int out_idx = y * rgba_pitch + x * 4;
@@ -323,27 +358,27 @@ extern "C" void launch_nv12_to_rgba(
     const uint8_t* y_plane, int y_pitch,
     const uint8_t* uv_plane, int uv_pitch,
     uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix)
+    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange)
 {
     dim3 block(16, 16);
     dim3 grid((w + 15) / 16, (h + 15) / 16);
     nv12_to_rgba_kernel<<<grid, block, 0, stream>>>(
         y_plane, y_pitch, uv_plane, uv_pitch,
-        rgba_out, rgba_pitch, w, h, colorMatrix);
+        rgba_out, rgba_pitch, w, h, colorMatrix, srcRange);
 }
 
 extern "C" void launch_rgba_to_nv12(
     const uint8_t* rgba, int rgba_pitch,
     uint8_t* y_plane, int y_pitch,
     uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix)
+    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange)
 {
     dim3 block(16, 16);
     dim3 grid((w + 15) / 16, (h + 15) / 16);
     rgba_to_nv12_kernel<<<grid, block, 0, stream>>>(
         rgba, rgba_pitch,
         y_plane, y_pitch, uv_plane, uv_pitch,
-        w, h, colorMatrix);
+        w, h, colorMatrix, srcRange);
 }
 
 extern "C" void launch_abgr10_to_p010(

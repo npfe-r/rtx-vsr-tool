@@ -26,16 +26,12 @@ set(NGX_CORE_LIB_DEBUG   "${NGX_LIB_DIR}/nvsdk_ngx_d_dbg.lib")
 # Select debug/release NGX lib to match the active CRT (/MD vs /MDd)
 set(NGX_CORE_LIB "$<IF:$<CONFIG:Debug>,${NGX_CORE_LIB_DEBUG},${NGX_CORE_LIB_RELEASE}>")
 
-# TensorRT (替代 NvOFFRUC)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-find_package(TensorRT REQUIRED)
-message(STATUS "TensorRT ${TensorRT_VERSION} found: ${TensorRT_INCLUDE_DIRS}")
+
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.cu)
 
-# Exclude test sources and old NvOFFRUC files from the main target
+# Exclude test sources from the main target
 list(FILTER SOURCES EXCLUDE REGEX "test_cuda_enc\\.cpp$")
-list(FILTER SOURCES EXCLUDE REGEX "frame_interpolator\\.(cpp|h)$")
 
 add_executable(RTX_VSR_Tool WIN32 ${SOURCES} src/res/resources.rc)
 
@@ -43,7 +39,6 @@ target_include_directories(RTX_VSR_Tool PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${RTX_SDK_INCLUDE_DIR}
-    ${TensorRT_INCLUDE_DIRS}
 )
 
 # Tell MSVC to treat source files as UTF-8 and emit UTF-8 (fixes Chinese chars)
@@ -62,7 +57,6 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
     FFmpeg::swresample
     CUDA::cudart
     CUDA::cuda_driver
-    ${TensorRT_LIBRARIES}        # nvinfer + nvonnxparser + nvinfer_plugin (包含 cuDNN 内部链接)
     "${NGX_CORE_LIB}"
     imgui
     d3d11
@@ -112,8 +106,4 @@ add_custom_command(TARGET RTX_VSR_Tool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${FFMPEG_DIR}/bin/swresample-6.dll"
         "$<TARGET_FILE_DIR:RTX_VSR_Tool>/swresample-6.dll"
-    # Copy RIFE ONNX model to output dir
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_CURRENT_SOURCE_DIR}/models/rife/rife-v4.6/rife_v4.6.onnx"
-        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/rife_v4.6.onnx"
 )

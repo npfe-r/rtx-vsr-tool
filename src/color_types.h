@@ -2,9 +2,10 @@
 
 // Simplified color matrix identifiers for YUV↔RGB conversion
 enum ColorMatrix : int {
-    COLOR_MATRIX_BT601  = 0,
-    COLOR_MATRIX_BT709  = 1,  // default for HD content
-    COLOR_MATRIX_BT2020 = 2,  // BT.2020 NCL
+    COLOR_MATRIX_BT601       = 0,
+    COLOR_MATRIX_BT709       = 1,  // default for HD content
+    COLOR_MATRIX_BT2020_NCL  = 2,  // BT.2020 Non-Constant Luminance
+    COLOR_MATRIX_BT2020_CL   = 3,  // BT.2020 Constant Luminance
 };
 
 // Pixel range for luma/chroma

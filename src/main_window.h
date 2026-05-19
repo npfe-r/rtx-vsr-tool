@@ -78,8 +78,6 @@ private:
     int     m_thdrSaturation  = 100;
     int     m_thdrMiddleGray  = 50;
     int     m_thdrMaxLuminance = 1000;
-    int     m_frameInterpolation = 0;
-    int     m_frucPosition = 0;          // 0=后插帧, 1=前插帧
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]    = {};
     char    m_encoderWarning[256] = {};
