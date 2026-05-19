@@ -55,6 +55,11 @@ public:
     bool GetFrameBuffer(uint8_t** y, int* yPitch, uint8_t** uv, int* uvPitch);
     bool SubmitFrame(int64_t pts);
 
+    // Clear the status callback — used before Close() during SEH recovery to
+    // avoid calling a corrupted lambda (the callback captures local variables
+    // from the pipeline thread's stack frame).
+    void ClearStatusCallback();
+
 private:
     struct Impl;
     Impl* m;

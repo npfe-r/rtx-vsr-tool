@@ -109,10 +109,12 @@ void PipelineController::ThreadFunc() {
             if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
             if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
             if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
+            if (m_slots[i].d_rgba_interp) cudaFree(m_slots[i].d_rgba_interp);
             if (m_slots[i].decodeEvent)  cudaEventDestroy(m_slots[i].decodeEvent);
             if (m_slots[i].vsrEvent)     cudaEventDestroy(m_slots[i].vsrEvent);
             if (m_slots[i].stream)       cudaStreamDestroy(m_slots[i].stream);
         }
+        m_encoder.ClearStatusCallback();
         __try { m_encoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         __try { m_decoder.Close(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
         __try { m_frameInterpolator.Shutdown(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
@@ -175,6 +177,7 @@ void PipelineController::DecodeFunc() {
 
         FrameSlot& slot = m_slots[slotIdx];
         slot.seq = decFrameIdx;
+        slot.hasInterp = false;
 
         bool useGPU = m_decoder.IsHWDecoding();
         if (useGPU) {
@@ -242,6 +245,44 @@ void PipelineController::DecodeFunc() {
             slot.state.store(SlotState::Empty);
             m_slotCv.notify_one();
             break;
+        }
+
+        // ── 前插帧 (FRUC_before_VSR) ──
+        if (m_fiBeforeVsr && m_fiActive) {
+            double ts = slot.pts >= 0
+                ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
+                : (double)slot.seq.load() / m_srcFps;
+
+            uint64_t interpNV12 = 0;
+            int interpPitch = 0;
+            bool frameRepeat = false;
+
+            // ProcessFrameNV12 内部: rgba_to_nv12(默认流) → FRUC → 输出 NV12
+            if (m_frameInterpolator.ProcessFrameNV12(
+                    (uint64_t)slot.d_rgba_src, ts,
+                    interpNV12, interpPitch, frameRepeat)) {
+
+                // 同步 FRUC 默认流 → per-slot 流
+                cudaEventRecord(slot.decodeEvent, 0);
+                cudaStreamWaitEvent(slot.stream, slot.decodeEvent, 0);
+
+                // NV12 → RGBA (per-slot 流) → d_rgba_interp
+                size_t yBytes = (size_t)m_srcW * m_srcH;
+                launch_nv12_to_rgba(
+                    (const uint8_t*)interpNV12, interpPitch,
+                    (const uint8_t*)(interpNV12 + yBytes), interpPitch,
+                    slot.d_rgba_interp, m_srcW * 4,
+                    m_srcW, m_srcH, slot.stream, m_colorMatrix);
+                cudaStreamSynchronize(slot.stream);
+                if (CudaFailed("前插帧 NV12→RGBA")) {
+                    m_state.store(PipelineState::Error);
+                    slot.state.store(SlotState::Empty);
+                    m_slotCv.notify_one();
+                    break;
+                }
+                slot.hasInterp = true;
+            }
+            // 首帧: ProcessFrameNV12 返回 false, hasInterp 保持 false
         }
 
         slot.state.store(SlotState::VSR_Ready);
@@ -322,6 +363,7 @@ void PipelineController::ThreadFuncImpl() {
 
     // Store pipeline flags
     m_trueHdrEnabled = m_cfg.trueHdrEnabled;
+    m_fiBeforeVsr = (m_cfg.frucPosition == 1);
 
     // Store source colour metadata
     m_colorMatrix       = info.srcColorMatrix;
@@ -397,6 +439,16 @@ void PipelineController::ThreadFuncImpl() {
             goto cleanup;
         }
 
+        // 前插帧: 分配源分辨率 RGBA 插值帧缓冲区
+        if (m_fiBeforeVsr) {
+            if (cudaMalloc(&m_slots[i].d_rgba_interp, rgbaSrcSize) != cudaSuccess) {
+                LogMsg("PIP: ","Failed to allocate d_rgba_interp");
+                if (onError) onError(L"GPU 内存分配失败");
+                m_state.store(PipelineState::Error);
+                goto cleanup;
+            }
+        }
+
         // Non-blocking per-slot streams for GPU kernel overlap
         if (cudaStreamCreateWithFlags(&m_slots[i].stream, cudaStreamNonBlocking) != cudaSuccess) {
             LogMsg("PIP: ","Failed to create CUDA stream");
@@ -440,16 +492,30 @@ void PipelineController::ThreadFuncImpl() {
                                 m_cfg.thdrMiddleGray, m_cfg.thdrMaxLuminance);
     }
 
+    // ---- Validate FRUC + TrueHDR compatibility ----
+    // 后插帧 (After VSR) + TrueHDR 不兼容，拒绝启动
+    if (m_cfg.frameInterpolation && !m_fiBeforeVsr && m_trueHdrEnabled) {
+        LogMsg("PIP: ","后插帧与 TrueHDR 不兼容");
+        if (onError) onError(L"后插帧与 TrueHDR 不兼容，请选择前插帧或关闭 TrueHDR");
+        m_state.store(PipelineState::Error);
+        goto cleanup;
+    }
+
     // ---- Init FrameInterpolator (FRUC) ----
     m_fiActive = false;
     m_totalOutputFrames = m_totalFrames;
-    if (m_cfg.frameInterpolation && !m_trueHdrEnabled && m_cfg.qualityLevel > 0) {
+    if (m_cfg.frameInterpolation && m_cfg.qualityLevel > 0) {
         LogStatus(onStatus, "初始化帧插值...");
-        if (m_frameInterpolator.Initialize(m_dstW, m_dstH, m_cfg.gpuIndex, m_colorMatrix)) {
+        int frucW = m_fiBeforeVsr ? m_srcW : m_dstW;
+        int frucH = m_fiBeforeVsr ? m_srcH : m_dstH;
+        if (m_frameInterpolator.Initialize(frucW, frucH, m_cfg.gpuIndex, m_colorMatrix)) {
             m_fiActive = true;
             m_totalOutputFrames = m_frameInterpolator.GetExpectedOutputFrames(m_totalFrames);
             outFps = m_srcFps * 2.0;
-            { char buf[128]; snprintf(buf, sizeof(buf), "帧插值已启用 (2x), fps=%.3f", outFps); LogStatus(onStatus, buf); }
+            char buf[128];
+            snprintf(buf, sizeof(buf), "帧插值已启用 (2x, %s, %dx%d)",
+                     m_fiBeforeVsr ? "前插帧" : "后插帧", frucW, frucH);
+            LogStatus(onStatus, buf);
         } else {
             LogStatus(onStatus, "帧插值初始化失败，将不使用");
         }
@@ -592,32 +658,6 @@ void PipelineController::ThreadFuncImpl() {
 
         FrameSlot& slot = m_slots[slotIdx];
 
-        // VSR process (SEH-safe)
-        vsrCtx.src  = slot.d_rgba_src;
-        vsrCtx.dst  = slot.d_rgba_dst;
-        vsrCtx.srcW = m_srcW;
-        vsrCtx.srcH = m_srcH;
-        vsrCtx.dstW = m_dstW;
-        vsrCtx.dstH = m_dstH;
-
-        if (!SafeVSRProcess(&vsrCtx)) {
-            LogMsg("PIP: ","VSR evaluate failed or crashed");
-            if (onError) onError(L"VSR 处理失败");
-            m_state.store(PipelineState::Error);
-            break;
-        }
-
-        // ---- Sync VSR output (default stream) → per-slot stream ----
-        // VSR/NGX runs on the default CUDA stream (stream 0) and writes
-        // d_rgba_dst asynchronously.  The rgba_to_nv12 kernel below runs
-        // on the per-slot non-blocking stream (cudaStreamNonBlocking).
-        // cudaStreamNonBlocking does NOT participate in default-stream
-        // implicit synchronisation, so without an explicit barrier the
-        // conversion kernel may read stale / partially-written data and
-        // produce corrupted output (old frame content leaking through).
-        cudaEventRecord(slot.vsrEvent, 0);             // VSR's default stream
-        cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);  // per-slot waits
-
         // ---- Encode output frame(s) ----
         {
             // Encode helper — GPU zero-copy first, D2H+CPU fallback
@@ -672,54 +712,105 @@ void PipelineController::ThreadFuncImpl() {
                 return true;
             };
 
-            if (m_fiActive) {
-                // FRUC: interpolated frame first, then original
-                uint64_t interpPtr = 0;
-                int interpPitch = 0;
-                bool frameRepeat = false;
+            vsrCtx.dst  = slot.d_rgba_dst;
+            vsrCtx.srcW = m_srcW;
+            vsrCtx.srcH = m_srcH;
+            vsrCtx.dstW = m_dstW;
+            vsrCtx.dstH = m_dstH;
+
+            if (slot.hasInterp) {
+                // ── 前插帧: 2 轮 VSR ──
+                int64_t pts = (int64_t)m_framesEncoded.load();
+
+                // 第 1 轮: 插值帧 RGBA → VSR → encode
+                vsrCtx.src = slot.d_rgba_interp;
+                if (!SafeVSRProcess(&vsrCtx)) {
+                    LogMsg("PIP: ","VSR evaluate failed or crashed (interp)");
+                    if (onError) onError(L"VSR 处理失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                cudaEventRecord(slot.vsrEvent, 0);
+                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
+                if (!encodeFrame(slot.d_rgba_dst, pts, m_trueHdrEnabled)) {
+                    LogMsg("PIP: ","Encode failed (interp)");
+                    if (onError) onError(L"编码失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                m_framesEncoded.fetch_add(1);
+
+                // 第 2 轮: 原始帧 RGBA → VSR → encode
+                vsrCtx.src = slot.d_rgba_src;
+                if (!SafeVSRProcess(&vsrCtx)) {
+                    LogMsg("PIP: ","VSR evaluate failed or crashed (original)");
+                    if (onError) onError(L"VSR 处理失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                cudaEventRecord(slot.vsrEvent, 0);
+                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
+                if (!encodeFrame(slot.d_rgba_dst, pts + 1, m_trueHdrEnabled)) {
+                    LogMsg("PIP: ","Encode failed (original)");
+                    if (onError) onError(L"编码失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                m_framesEncoded.fetch_add(1);
+
+            } else if (m_fiActive && !m_fiBeforeVsr) {
+                // ── 后插帧: 1 轮 VSR + FRUC NV12 直通 ──
+                vsrCtx.src = slot.d_rgba_src;
+                if (!SafeVSRProcess(&vsrCtx)) {
+                    LogMsg("PIP: ","VSR evaluate failed or crashed");
+                    if (onError) onError(L"VSR 处理失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                cudaEventRecord(slot.vsrEvent, 0);
+                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
+
+                // FRUC 后插帧编码 (从 d_rgba_dst 产 2 帧)
                 double ts = slot.pts >= 0
                     ? (double)slot.pts * m_srcTimeBaseNum / m_srcTimeBaseDen
                     : (double)slot.seq.load() / m_srcFps;
 
-                // Use NV12 direct path: FRUC outputs NV12 → D2D copy to encoder NV12 buffers,
-                // skipping the NV12→RGBA→NV12 round-trip.
+                uint64_t interpPtr = 0;
+                int interpPitch = 0;
+                bool frameRepeat = false;
                 if (m_frameInterpolator.ProcessFrameNV12(
-                        (uint64_t)slot.d_rgba_dst, ts, interpPtr, interpPitch, frameRepeat)) {
-                    int64_t pts = (int64_t)m_framesEncoded.load();
+                        (uint64_t)slot.d_rgba_dst, ts,
+                        interpPtr, interpPitch, frameRepeat)) {
+                    int64_t interpPts = (int64_t)m_framesEncoded.load();
                     char logBuf[128];
-                    snprintf(logBuf, sizeof(logBuf), "FRUC encode interpolated frame seq=%d repeat=%d", (int)pts, (int)frameRepeat);
+                    snprintf(logBuf, sizeof(logBuf), "FRUC encode interpolated frame seq=%d repeat=%d", (int)interpPts, (int)frameRepeat);
                     LogMsg("PIP: ", logBuf);
 
-                    // NV12 D2D copy to encoder's frame buffer (GPU zero-copy) or device buffer (CPU fallback)
+                    size_t yBytes = (size_t)m_dstW * m_dstH;
                     uint8_t* encY = nullptr;
                     uint8_t* encUV = nullptr;
                     int encYPitch = 0, encUVPitch = 0;
-                    size_t yBytes = (size_t)m_dstW * m_dstH;
                     if (m_encoder.GetFrameBuffer(&encY, &encYPitch, &encUV, &encUVPitch)) {
-                        // GPU zero-copy: D2D copy FRUC NV12 → encoder NV12 buffers
                         cudaMemcpy2DAsync(encY, encYPitch, (void*)interpPtr, interpPitch,
                                           m_dstW, m_dstH, cudaMemcpyDeviceToDevice, slot.stream);
                         cudaMemcpy2DAsync(encUV, encUVPitch, (void*)(interpPtr + yBytes), interpPitch,
                                           m_dstW, m_dstH / 2, cudaMemcpyDeviceToDevice, slot.stream);
-
                         cudaStreamSynchronize(slot.stream);
                         if (CudaFailed("GPU: FRUC NV12 → encoder NV12 (D2D)"))
                             break;
-                        if (!m_encoder.SubmitFrame(pts)) {
+                        if (!m_encoder.SubmitFrame(interpPts)) {
                             LogMsg("PIP: ","FRUC interpolated SubmitFrame failed");
                             if (onError) onError(L"帧插值编码提交失败");
                             m_state.store(PipelineState::Error);
                             break;
                         }
                     } else {
-                        // CPU fallback: D2H directly from FRUC NV12 output
-                        // (m_interpolateResource is contiguous NV12, skip intermediate d_nv12_out)
                         cudaMemcpyAsync(slot.nv12_out_cpu, (void*)interpPtr, outSize,
                                         cudaMemcpyDeviceToHost, slot.stream);
                         cudaStreamSynchronize(slot.stream);
                         if (CudaFailed("CPU: FRUC NV12 D2H"))
                             break;
-                        if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, pts)) {
+                        if (!m_encoder.WriteFrameNV12(slot.nv12_out_cpu, m_dstW, m_dstW, interpPts)) {
                             LogMsg("PIP: ","FRUC interpolated WriteFrameNV12 failed");
                             if (onError) onError(L"帧插值编码写入失败");
                             m_state.store(PipelineState::Error);
@@ -729,24 +820,28 @@ void PipelineController::ThreadFuncImpl() {
                     m_framesEncoded.fetch_add(1);
                 }
 
-                // Original
-                {
-                    int64_t pts = (int64_t)m_framesEncoded.load();
-                    char logBuf[128];
-                    snprintf(logBuf, sizeof(logBuf), "FRUC encode original frame seq=%d", (int)pts);
-                    LogMsg("PIP: ", logBuf);
-                    if (!encodeFrame(slot.d_rgba_dst, pts, false)) {
-                        LogMsg("PIP: ","Original encode failed");
-                        if (onError) onError(L"编码失败");
-                        m_state.store(PipelineState::Error);
-                        break;
-                    }
-                    m_framesEncoded.fetch_add(1);
+                // 原始帧: encode
+                if (!encodeFrame(slot.d_rgba_dst, (int64_t)m_framesEncoded.load(), false)) {
+                    LogMsg("PIP: ","Original encode failed");
+                    if (onError) onError(L"编码失败");
+                    m_state.store(PipelineState::Error);
+                    break;
                 }
+                m_framesEncoded.fetch_add(1);
+
             } else {
-                // Single encode per slot (no FRUC)
-                int64_t pts = (int64_t)m_framesEncoded.load();
-                if (!encodeFrame(slot.d_rgba_dst, pts, m_trueHdrEnabled)) {
+                // ── 无 FRUC: 单轮 VSR + encode ──
+                vsrCtx.src = slot.d_rgba_src;
+                if (!SafeVSRProcess(&vsrCtx)) {
+                    LogMsg("PIP: ","VSR evaluate failed or crashed");
+                    if (onError) onError(L"VSR 处理失败");
+                    m_state.store(PipelineState::Error);
+                    break;
+                }
+                cudaEventRecord(slot.vsrEvent, 0);
+                cudaStreamWaitEvent(slot.stream, slot.vsrEvent, 0);
+
+                if (!encodeFrame(slot.d_rgba_dst, (int64_t)m_framesEncoded.load(), m_trueHdrEnabled)) {
                     LogMsg("PIP: ","Encode failed");
                     if (onError) onError(L"编码失败");
                     m_state.store(PipelineState::Error);
@@ -823,8 +918,9 @@ cleanup:
         if (m_slots[i].d_rgba_src)   cudaFree(m_slots[i].d_rgba_src);
         if (m_slots[i].d_rgba_dst)   cudaFree(m_slots[i].d_rgba_dst);
         if (m_slots[i].d_nv12_out)   cudaFree(m_slots[i].d_nv12_out);
+        if (m_slots[i].d_rgba_interp) cudaFree(m_slots[i].d_rgba_interp);
         m_slots[i].d_rgba_src = m_slots[i].d_rgba_dst = nullptr;
-        m_slots[i].d_nv12 = m_slots[i].d_nv12_out = nullptr;
+        m_slots[i].d_nv12 = m_slots[i].d_nv12_out = m_slots[i].d_rgba_interp = nullptr;
         if (m_slots[i].decodeEvent) { cudaEventDestroy(m_slots[i].decodeEvent); m_slots[i].decodeEvent = nullptr; }
         if (m_slots[i].vsrEvent) { cudaEventDestroy(m_slots[i].vsrEvent); m_slots[i].vsrEvent = nullptr; }
         if (m_slots[i].stream) { cudaStreamDestroy(m_slots[i].stream); m_slots[i].stream = nullptr; }

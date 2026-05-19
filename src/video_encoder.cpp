@@ -118,6 +118,7 @@ static bool IsResolutionWithinNVENC(int codecId, int width, int height) {
 VideoEncoder::VideoEncoder() : m(new Impl) {}
 VideoEncoder::~VideoEncoder() { Close(); delete m; }
 bool VideoEncoder::IsOpen() const { return m->fmtCtx != nullptr; }
+void VideoEncoder::ClearStatusCallback() { m->statusCb = nullptr; }
 
 bool VideoEncoder::Open(const EncodeConfig& cfg, OnEncoderStatus statusCb) {
     Close();

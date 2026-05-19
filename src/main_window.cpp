@@ -825,18 +825,40 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     {
         bool fiOn = (m_frameInterpolation != 0);
-        bool fiDisabled = m_isRunning || (m_trueHdrEnabled != 0);
+        bool fiDisabled = m_isRunning;
         if (fiDisabled) ImGui::BeginDisabled();
         if (ImGui::Checkbox("##fi", &fiOn)) {
             m_frameInterpolation = fiOn ? 1 : 0;
         }
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "2x FRUC");
-        if (fiDisabled && m_trueHdrEnabled) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "(TrueHDR冲突)");
-        }
         if (fiDisabled) ImGui::EndDisabled();
+    }
+
+    // ── FRUC 执行位置下拉 (FRUC 启用时可选) ──
+    if (m_frameInterpolation) {
+        ImGui::Indent(16.0f);
+
+        // TrueHDR 启用时自动切换到前插帧（后插帧不兼容）
+        if (m_trueHdrEnabled && m_frucPosition == 0) {
+            m_frucPosition = 1;
+        }
+
+        const char* frucItems[] = {
+            "后插帧 (After VSR)",
+            "前插帧 (Before VSR)    [TrueHDR 兼容]",
+        };
+
+        bool posDisabled = m_isRunning || (m_frucPosition == 0 && m_trueHdrEnabled);
+        if (posDisabled) ImGui::BeginDisabled();
+        if (ImGui::Combo("##frucPos", &m_frucPosition, frucItems, IM_ARRAYSIZE(frucItems))) {
+            // 用户手动选择
+        }
+        if (posDisabled) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "执行位置");
+        ImGui::Unindent(16.0f);
     }
     ImGui::Separator();
 
@@ -1336,6 +1358,7 @@ void MainWindow::OnStartStop()
         pc.audioBitrate = m_audioBitrate;
         pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
         pc.frameInterpolation = (m_frameInterpolation != 0);
+        pc.frucPosition = m_frucPosition;
         pc.thdrContrast    = m_thdrContrast;
         pc.thdrSaturation  = m_thdrSaturation;
         pc.thdrMiddleGray  = m_thdrMiddleGray;
@@ -1482,6 +1505,7 @@ void MainWindow::LoadConfigToUI()
     m_thdrMiddleGray    = cfg.thdrMiddleGray;
     m_thdrMaxLuminance  = cfg.thdrMaxLuminance;
     m_frameInterpolation = cfg.frameInterpolation;
+    m_frucPosition = cfg.frucPosition;
 }
 
 void MainWindow::SaveUIToConfig()
@@ -1508,4 +1532,5 @@ void MainWindow::SaveUIToConfig()
     cfg.thdrMiddleGray  = m_thdrMiddleGray;
     cfg.thdrMaxLuminance = m_thdrMaxLuminance;
     cfg.frameInterpolation = m_frameInterpolation;
+    cfg.frucPosition = m_frucPosition;
 }

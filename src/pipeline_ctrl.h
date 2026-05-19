@@ -57,6 +57,7 @@ struct PipelineConfig {
     int audioBitrate = 128;
     bool trueHdrEnabled = false;
     bool frameInterpolation = false;
+    int  frucPosition = 0;
     int  thdrContrast    = 100;
     int  thdrSaturation  = 100;
     int  thdrMiddleGray  = 50;
@@ -113,6 +114,7 @@ private:
         uint8_t* d_rgba_src   = nullptr;
         uint8_t* d_rgba_dst   = nullptr;
         uint8_t* d_nv12_out   = nullptr;
+        uint8_t* d_rgba_interp = nullptr;  // 前插帧: 源分辨率插值帧 RGBA
 
         cudaStream_t stream = nullptr;
         cudaEvent_t decodeEvent = nullptr; // NVDEC default-stream → per-slot stream sync
@@ -121,6 +123,7 @@ private:
 
         std::atomic<int> seq{0}; // frame sequence number, set by decode thread
         int64_t pts = -1;        // presentation timestamp from decoder
+        bool hasInterp = false;  // 前插帧: 此槽有待处理的插值帧
 
         int w = 0, h = 0;
         int dstW = 0, dstH = 0;
@@ -140,6 +143,7 @@ private:
     FrameInterpolator m_frameInterpolator;
 
     bool m_fiActive = false;
+    bool m_fiBeforeVsr = false;
     int  m_totalOutputFrames = 0;
     std::vector<void*> m_audioPackets;
 

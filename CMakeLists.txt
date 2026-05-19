@@ -20,16 +20,22 @@ set(RTX_SDK_INCLUDE_DIR "${RTX_SDK_DIR}/include")
 
 # DLSS SDK (newer NGX Core, compatible with modern drivers)
 set(DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../DLSS-310.6.0")
-set(NGX_CORE_LIB "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
+set(NGX_LIB_DIR "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64")
+set(NGX_CORE_LIB_RELEASE "${NGX_LIB_DIR}/nvsdk_ngx_d.lib")
+set(NGX_CORE_LIB_DEBUG   "${NGX_LIB_DIR}/nvsdk_ngx_d_dbg.lib")
+# Select debug/release NGX lib to match the active CRT (/MD vs /MDd)
+set(NGX_CORE_LIB "$<IF:$<CONFIG:Debug>,${NGX_CORE_LIB_DEBUG},${NGX_CORE_LIB_RELEASE}>")
 
-# Optical Flow SDK (NvOFFRUC) — runtime-loaded DLL, no static lib needed
-set(OFA_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../Optical_Flow_SDK_5.0.7")
-set(OFA_INCLUDE_DIR "${OFA_SDK_DIR}/NvOFFRUC/Interface")
+# TensorRT (替代 NvOFFRUC)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+find_package(TensorRT REQUIRED)
+message(STATUS "TensorRT ${TensorRT_VERSION} found: ${TensorRT_INCLUDE_DIRS}")
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.cu)
 
-# Exclude test sources from the main target
+# Exclude test sources and old NvOFFRUC files from the main target
 list(FILTER SOURCES EXCLUDE REGEX "test_cuda_enc\\.cpp$")
+list(FILTER SOURCES EXCLUDE REGEX "frame_interpolator\\.(cpp|h)$")
 
 add_executable(RTX_VSR_Tool WIN32 ${SOURCES} src/res/resources.rc)
 
@@ -37,7 +43,7 @@ target_include_directories(RTX_VSR_Tool PRIVATE
     src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${RTX_SDK_INCLUDE_DIR}
-    ${OFA_INCLUDE_DIR}
+    ${TensorRT_INCLUDE_DIRS}
 )
 
 # Tell MSVC to treat source files as UTF-8 and emit UTF-8 (fixes Chinese chars)
@@ -56,6 +62,8 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
     FFmpeg::swresample
     CUDA::cudart
     CUDA::cuda_driver
+    CUDA::cudnn                  # TensorRT 需要
+    ${TensorRT_LIBRARIES}        # nvinfer + nvonnxparser + nvinfer_plugin
     "${NGX_CORE_LIB}"
     imgui
     d3d11
@@ -68,6 +76,12 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
     advapi32
 )
 
+# Set VS debugger working directory to $(TargetDir) so FFmpeg/NGX DLLs
+# are found at runtime when pressing F5 (default is $(ProjectDir)).
+set_target_properties(RTX_VSR_Tool PROPERTIES
+    VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:RTX_VSR_Tool>"
+)
+
 # CUDA hwcontext + NVENC zero-copy test (standalone, no GUI, no NGX dependency)
 # Disabled: add_executable(test_cuda_enc src/test_cuda_enc.cpp)
 # target_link_libraries(test_cuda_enc PRIVATE
@@ -76,17 +90,7 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
 #     FFmpeg::avutil
 # )
 
-# Copy SDK DLLs to output dir
-# NOTE: NvOFFRUC.dll is copied as PRE_BUILD (before compilation) to ensure it exists
-# for any build-time checks; all other DLLs are POST_BUILD.
-add_custom_command(TARGET RTX_VSR_Tool PRE_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OFA_SDK_DIR}/NvOFFRUC/NvOFFRUCSample/bin/win64/NvOFFRUC.dll"
-        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/NvOFFRUC.dll"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OFA_SDK_DIR}/NvOFFRUC/NvOFFRUCSample/bin/win64/cudart64_110.dll"
-        "$<TARGET_FILE_DIR:RTX_VSR_Tool>/cudart64_110.dll"
-)
+# Copy SDK DLLs to output dir (已移除 NvOFFRUC DLL 拷贝)
 add_custom_command(TARGET RTX_VSR_Tool POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${RTX_SDK_DIR}/bin/Windows/x64/rel/nvngx_vsr.dll"
