@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <functional>
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 // ── RIFE TensorRT 帧插值引擎 ──

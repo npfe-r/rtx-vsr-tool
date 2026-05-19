@@ -62,8 +62,7 @@ target_link_libraries(RTX_VSR_Tool PRIVATE
     FFmpeg::swresample
     CUDA::cudart
     CUDA::cuda_driver
-    CUDA::cudnn                  # TensorRT 需要
-    ${TensorRT_LIBRARIES}        # nvinfer + nvonnxparser + nvinfer_plugin
+    ${TensorRT_LIBRARIES}        # nvinfer + nvonnxparser + nvinfer_plugin (包含 cuDNN 内部链接)
     "${NGX_CORE_LIB}"
     imgui
     d3d11

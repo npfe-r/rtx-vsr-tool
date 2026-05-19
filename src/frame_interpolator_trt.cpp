@@ -127,7 +127,7 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     INetworkDefinition* net = builder->createNetworkV2(flag);
     auto parser = nvonnxparser::createParser(*net, g_trtLogger);
     if (!parser->parseFromFile(onnxPath, 0)) {
-        LOG("ONNX 解析失败"); parser->destroy(); net->destroy(); builder->destroy(); return false;
+        LOG("ONNX 解析失败"); delete parser; delete net; delete builder; return false;
     }
 
     // 检测 I/O 名称
@@ -160,7 +160,7 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     IHostMemory* serialized = builder->buildSerializedNetwork(*net, *cfg);
     if (!serialized) {
         LOG("buildSerializedNetwork 失败");
-        cfg->destroy(); parser->destroy(); net->destroy(); builder->destroy();
+        delete cfg; delete parser; delete net; delete builder;
         return false;
     }
 
@@ -174,11 +174,11 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     outCache.write((const char*)serialized->data(), serialized->size());
     outCache.close();
 
-    serialized->destroy();
-    cfg->destroy();
-    parser->destroy();
-    net->destroy();
-    builder->destroy();
+    delete serialized;
+    delete cfg;
+    delete parser;
+    delete net;
+    delete builder;
 
     m_engineReady = true;
     LOG("TensorRT engine 构建完成，已缓存");
@@ -217,20 +217,17 @@ bool FrameInterpolatorRIFE::ProcessFrame(
 
     cudaStreamSynchronize(0);
 
-    // Step 3: TensorRT 推理
+    // Step 3: TensorRT 推理 (executeV2 兼容 TRT 8-10)
     {
         using namespace nvinfer1;
         IExecutionContext* ctx = (IExecutionContext*)m_trtContext;
-        ICudaEngine* eng = (ICudaEngine*)m_trtEngine;
 
-        // TensorRT 8-10 兼容方式: enqueueV2
-        int inIdx  = eng->getBindingIndex(m_inputName.c_str());
-        int outIdx = eng->getBindingIndex(m_outputName.c_str());
-        void* bindings[8] = {};
-        bindings[inIdx]  = (void*)m_rgbFloat6ch;
-        bindings[outIdx] = (void*)m_rgbFloatOut;
+        // executeV2 使用 binding index: 0=input, 1=output
+        void* bindings[2] = {};
+        bindings[0] = (void*)m_rgbFloat6ch;  // input
+        bindings[1] = (void*)m_rgbFloatOut;  // output
 
-        if (!ctx->enqueueV2(bindings, 0, nullptr)) {
+        if (!ctx->executeV2(bindings)) {
             LOG("TensorRT 推理失败");
             return false;
         }
@@ -278,7 +275,7 @@ void FrameInterpolatorRIFE::Shutdown() {
 }
 
 void FrameInterpolatorRIFE::DestroyEngine() {
-    if (m_trtContext) { ((nvinfer1::IExecutionContext*)m_trtContext)->destroy(); m_trtContext = nullptr; }
-    if (m_trtEngine)  { ((nvinfer1::ICudaEngine*)m_trtEngine)->destroy();  m_trtEngine  = nullptr; }
-    if (m_trtRuntime) { ((nvinfer1::IRuntime*)m_trtRuntime)->destroy();    m_trtRuntime  = nullptr; }
+    if (m_trtContext) { delete (nvinfer1::IExecutionContext*)m_trtContext; m_trtContext = nullptr; }
+    if (m_trtEngine)  { delete (nvinfer1::ICudaEngine*)m_trtEngine;  m_trtEngine  = nullptr; }
+    if (m_trtRuntime) { delete (nvinfer1::IRuntime*)m_trtRuntime;    m_trtRuntime  = nullptr; }
 }
