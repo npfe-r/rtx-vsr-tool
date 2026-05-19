@@ -57,6 +57,7 @@ bool FrameInterpolatorRIFE::Initialize(
 
     if (!IsModelPresent(onnxModelPath)) {
         char b[512]; snprintf(b, sizeof(b), "ONNX 模型未找到: %s", onnxModelPath);
+        m_lastError = "rife_v4.6.onnx 模型文件未找到，请确认文件与程序在同一目录";
         LOG(b); return false;
     }
 
@@ -67,7 +68,10 @@ bool FrameInterpolatorRIFE::Initialize(
     cuCtxSetCurrent(m_cuContext);
 
     // TensorRT engine
-    if (!LoadOrBuildEngine(onnxModelPath)) { Shutdown(); return false; }
+    if (!LoadOrBuildEngine(onnxModelPath)) {
+        if (m_lastError.empty()) m_lastError = "TensorRT engine 构建失败";
+        Shutdown(); return false;
+    }
 
     // 分配 GPU 内存（使用对齐到 32 的尺寸）
     size_t rgba4sz  = (size_t)m_alignedW * m_alignedH * 4;
@@ -78,10 +82,10 @@ bool FrameInterpolatorRIFE::Initialize(
         return (sz == 0) || (cuMemAlloc((CUdeviceptr*)&p, sz) == CUDA_SUCCESS);
     };
 
-    if (!cuAlloc(m_prevRgba,    rgba4sz))  { LOG("alloc prevRgba failed");     Shutdown(); return false; }
-    if (!cuAlloc(m_rgbFloat6ch, rgb6ch))   { LOG("alloc rgbFloat6ch failed"); Shutdown(); return false; }
-    if (!cuAlloc(m_rgbFloatOut, rgb3ch))   { LOG("alloc rgbFloatOut failed"); Shutdown(); return false; }
-    if (!cuAlloc(m_rgbaOutput,  rgba4sz))  { LOG("alloc rgbaOutput failed");  Shutdown(); return false; }
+    if (!cuAlloc(m_prevRgba,    rgba4sz))  { m_lastError = "GPU 内存分配失败(prevRgba)"; LOG("alloc prevRgba failed");     Shutdown(); return false; }
+    if (!cuAlloc(m_rgbFloat6ch, rgb6ch))   { m_lastError = "GPU 内存分配失败(rgbFloat6ch)"; LOG("alloc rgbFloat6ch failed"); Shutdown(); return false; }
+    if (!cuAlloc(m_rgbFloatOut, rgb3ch))   { m_lastError = "GPU 内存分配失败(rgbFloatOut)"; LOG("alloc rgbFloatOut failed"); Shutdown(); return false; }
+    if (!cuAlloc(m_rgbaOutput,  rgba4sz))  { m_lastError = "GPU 内存分配失败(rgbaOutput)"; LOG("alloc rgbaOutput failed");  Shutdown(); return false; }
 
     m_hasPrev = false;
     m_initialized = true;
@@ -124,12 +128,13 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     LOG("从 ONNX 构建 TensorRT engine（首次约 10-30 秒）...");
 
     IBuilder* builder = createInferBuilder(g_trtLogger);
-    if (!builder) { LOG("createInferBuilder 失败"); return false; }
+    if (!builder) { m_lastError = "createInferBuilder 失败"; LOG("createInferBuilder 失败"); return false; }
 
     uint32_t flag = 1U << (uint32_t)NetworkDefinitionCreationFlag::kEXPLICIT_BATCH;
     INetworkDefinition* net = builder->createNetworkV2(flag);
     auto parser = nvonnxparser::createParser(*net, g_trtLogger);
     if (!parser->parseFromFile(onnxPath, 0)) {
+        m_lastError = "ONNX 模型解析失败，模型文件可能已损坏";
         LOG("ONNX 解析失败"); delete parser; delete net; delete builder; return false;
     }
 
@@ -163,6 +168,7 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
 
     IHostMemory* serialized = builder->buildSerializedNetwork(*net, *cfg);
     if (!serialized) {
+        m_lastError = "TensorRT engine 构建失败，请检查日志以获取详细信息";
         LOG("buildSerializedNetwork 失败");
         delete cfg; delete parser; delete net; delete builder;
         return false;

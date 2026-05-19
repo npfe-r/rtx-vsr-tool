@@ -520,7 +520,14 @@ void PipelineController::ThreadFuncImpl() {
             LogStatus(onStatus, buf);
         } else {
             LogStatus(onStatus, "RIFE 帧插值初始化失败");
-            if (onError) onError(L"RIFE 帧插值初始化失败：请确保 rife_v4.6.onnx 模型文件与程序在同一目录");
+            {
+                char errMsg[512];
+                snprintf(errMsg, sizeof(errMsg), "RIFE 帧插值初始化失败：%s",
+                         m_frameInterpolatorRIFE.GetLastError());
+                wchar_t wbuf[512];
+                MultiByteToWideChar(CP_UTF8, 0, errMsg, -1, wbuf, 512);
+                if (onError) onError(wbuf);
+            }
             m_state.store(PipelineState::Error);
             goto cleanup;
         }

@@ -43,6 +43,7 @@ public:
     void Shutdown();
 
     bool IsInitialized() const { return m_initialized; }
+    const char* GetLastError() const { return m_lastError.c_str(); }
     std::function<void(const char*)> onLog;
 
 private:
@@ -75,4 +76,5 @@ private:
 
     CUcontext m_cuContext = nullptr;
     CUdevice  m_cuDevice  = 0;
+    std::string m_lastError;
 };
