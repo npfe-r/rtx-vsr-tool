@@ -519,8 +519,10 @@ void PipelineController::ThreadFuncImpl() {
                      m_fiBeforeVsr ? "前插帧" : "后插帧", frucW, frucH);
             LogStatus(onStatus, buf);
         } else {
-            LogStatus(onStatus, "RIFE 帧插值初始化失败，将不使用");
+            LogStatus(onStatus, "RIFE 帧插值初始化失败");
             if (onError) onError(L"RIFE 帧插值初始化失败：请确保 rife_v4.6.onnx 模型文件与程序在同一目录");
+            m_state.store(PipelineState::Error);
+            goto cleanup;
         }
     }
 
