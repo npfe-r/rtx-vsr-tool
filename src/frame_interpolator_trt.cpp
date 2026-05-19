@@ -73,9 +73,11 @@ bool FrameInterpolatorRIFE::Initialize(
         Shutdown(); return false;
     }
 
+    // ONNX 模型输入为 11 通道（前 6ch=prev||curr RGB，后 5ch=附加特征）
+    static constexpr int TRT_INPUT_CHANNELS = 11;
     // 分配 GPU 内存（使用对齐到 32 的尺寸）
     size_t rgba4sz  = (size_t)m_alignedW * m_alignedH * 4;
-    size_t rgb6ch   = (size_t)m_alignedW * m_alignedH * 6 * sizeof(float);
+    size_t rgbInSz  = (size_t)m_alignedW * m_alignedH * TRT_INPUT_CHANNELS * sizeof(float);
     size_t rgb3ch   = (size_t)m_alignedW * m_alignedH * 3 * sizeof(float);
 
     auto cuAlloc = [](uint64_t& p, size_t sz) -> bool {
@@ -83,7 +85,7 @@ bool FrameInterpolatorRIFE::Initialize(
     };
 
     if (!cuAlloc(m_prevRgba,    rgba4sz))  { m_lastError = "GPU 内存分配失败(prevRgba)"; LOG("alloc prevRgba failed");     Shutdown(); return false; }
-    if (!cuAlloc(m_rgbFloat6ch, rgb6ch))   { m_lastError = "GPU 内存分配失败(rgbFloat6ch)"; LOG("alloc rgbFloat6ch failed"); Shutdown(); return false; }
+    if (!cuAlloc(m_rgbFloat6ch, rgbInSz))   { m_lastError = "GPU 内存分配失败(rgbFloatIn)"; LOG("alloc rgbFloatIn failed"); Shutdown(); return false; }
     if (!cuAlloc(m_rgbFloatOut, rgb3ch))   { m_lastError = "GPU 内存分配失败(rgbFloatOut)"; LOG("alloc rgbFloatOut failed"); Shutdown(); return false; }
     if (!cuAlloc(m_rgbaOutput,  rgba4sz))  { m_lastError = "GPU 内存分配失败(rgbaOutput)"; LOG("alloc rgbaOutput failed");  Shutdown(); return false; }
 
@@ -144,18 +146,18 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     for (int i = 0; i < net->getNbOutputs(); i++)
         m_outputName = net->getOutput(i)->getName();
 
-    // 设置输入维度（对齐到 32）
+    // 设置输入维度（11 通道，对齐到 32）
     int aw = m_alignedW, ah = m_alignedH;
-    net->getInput(0)->setDimensions(Dims4{1, 6, ah, aw});
+    net->getInput(0)->setDimensions(Dims4{1, 11, ah, aw});
 
     // 优化 profile (固定尺寸，对齐到 32)
     IOptimizationProfile* profile = builder->createOptimizationProfile();
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kMIN,
-                           Dims4(1, 6, ah, aw));
+                           Dims4(1, 11, ah, aw));
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kOPT,
-                           Dims4(1, 6, ah, aw));
+                           Dims4(1, 11, ah, aw));
     profile->setDimensions(m_inputName.c_str(), OptProfileSelector::kMAX,
-                           Dims4(1, 6, ah, aw));
+                           Dims4(1, 11, ah, aw));
 
     IBuilderConfig* cfg = builder->createBuilderConfig();
     cfg->addOptimizationProfile(profile);
@@ -215,18 +217,19 @@ bool FrameInterpolatorRIFE::ProcessFrame(
         return false;
     }
 
-    // 清零 6ch 浮点输入（填充区保持 0）
-    cuMemsetD8((CUdeviceptr)m_rgbFloat6ch, 0, (size_t)m_alignedW * m_alignedH * 6 * sizeof(float));
+    // 清零 11ch 浮点输入（填充区保持 0）
+    cuMemsetD8((CUdeviceptr)m_rgbFloat6ch, 0, (size_t)m_alignedW * m_alignedH * 11 * sizeof(float));
 
-    // Step 1: prev RGBA → RGB float (6ch 前 3ch, 仅有效区域)
+    // Step 1: prev RGBA → RGB float (11ch 前 3ch, 仅有效区域)
     launch_rgba_to_rgb_float(
         (const uint8_t*)m_prevRgba, m_width * 4,
         (float*)m_rgbFloat6ch, m_width, m_height, 0, 0);
 
-    // Step 2: curr RGBA → RGB float (6ch 后 3ch)
+    // Step 2: curr RGBA → RGB float (11ch 中间 3ch, offset=3)
     launch_rgba_to_rgb_float(
         (const uint8_t*)rgbaSrc, m_width * 4,
         (float*)m_rgbFloat6ch, m_width, m_height, 3, 0);
+    // 后 5ch (offset=6) 保持 0（模型附加特征）
 
     cudaStreamSynchronize(0);
 

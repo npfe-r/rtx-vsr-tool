@@ -10,7 +10,7 @@
 // 输入/输出均为 RGBA CUdeviceptr，与现有管线无缝对接。
 //
 // RIFE ONNX 约定（vs-mlrt v4.6 格式）:
-//   单输入: "input"  (1, 6, H, W) float — prev||curr RGB 拼接
+//   单输入: "input"  (1, 11, H, W) float — 前 6ch=prev||curr RGB, 后 5ch=附加特征
 //   单输出: "output" (1, 3, H, W) float — 插值帧 RGB
 
 class FrameInterpolatorRIFE {
