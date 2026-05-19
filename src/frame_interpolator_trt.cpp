@@ -20,6 +20,10 @@ extern "C" void launch_rgb_float_to_rgba(
     const float* rgb_float, int w, int h,
     uint8_t* rgba, int rgba_pitch, cudaStream_t stream);
 
+extern "C" void launch_rife_fill_grid_multiplier(
+    float* trt_input, int w, int h,
+    int totalChannels, float timestep, cudaStream_t stream);
+
 #include "debug_util.h"
 #define LOG(x) LogMsg("RIFE: ", x)
 
@@ -219,7 +223,8 @@ bool FrameInterpolatorRIFE::ProcessFrame(
     }
 
     // 清零 11ch 浮点输入（填充区保持 0）
-    cuMemsetD8((CUdeviceptr)m_rgbFloat6ch, 0, (size_t)m_alignedW * m_alignedH * 11 * sizeof(float));
+    size_t planeSize = (size_t)m_alignedW * m_alignedH;
+    cuMemsetD8((CUdeviceptr)m_rgbFloat6ch, 0, planeSize * 11 * sizeof(float));
 
     // Step 1: prev RGBA → RGB float (11ch 前 3ch, 仅有效区域)
     launch_rgba_to_rgb_float(
@@ -230,11 +235,15 @@ bool FrameInterpolatorRIFE::ProcessFrame(
     launch_rgba_to_rgb_float(
         (const uint8_t*)rgbaSrc, m_width * 4,
         (float*)m_rgbFloat6ch, m_width, m_height, 3, 0);
-    // 后 5ch (offset=6) 保持 0（模型附加特征）
+
+    // Step 3: 生成 base_grid (ch7-8) 和 multiplier (ch9-10)
+    // ch6 (ext) 保持 0
+    launch_rife_fill_grid_multiplier(
+        (float*)m_rgbFloat6ch, m_alignedW, m_alignedH, 11, 0.5f, 0);
 
     cudaStreamSynchronize(0);
 
-    // Step 3: TensorRT 推理 (executeV2 兼容 TRT 8-10)
+    // Step 4: TensorRT 推理 (executeV2 兼容 TRT 8-10)
     {
         using namespace nvinfer1;
         IExecutionContext* ctx = (IExecutionContext*)m_trtContext;
@@ -251,13 +260,13 @@ bool FrameInterpolatorRIFE::ProcessFrame(
     }
     cudaStreamSynchronize(0);
 
-    // Step 4: RGB float → RGBA
+    // Step 5: RGB float → RGBA
     launch_rgb_float_to_rgba(
         (const float*)m_rgbFloatOut, m_width, m_height,
         (uint8_t*)m_rgbaOutput, m_width * 4, 0);
     cudaStreamSynchronize(0);
 
-    // Step 5: 更新 prev 缓存
+    // Step 6: 更新 prev 缓存
     cuMemcpyDtoD((CUdeviceptr)m_prevRgba, (CUdeviceptr)rgbaSrc,
                  (size_t)m_width * m_height * 4);
 

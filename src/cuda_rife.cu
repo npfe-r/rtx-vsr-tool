@@ -46,6 +46,31 @@ __global__ void rgb_float_to_rgba_kernel(
     dst[3] = 255;
 }
 
+// ── 生成 RIFE 坐标网格和时间步长 (11ch 输入的 7-10ch) ──
+// RIFE 模型输入 = [prev(3), curr(3), ext(1), base_grid(2), multiplier(2)]
+// 该核函数填充 channel=7 开始的 base_grid 和 channel=9 开始的 multiplier
+// base_grid: [-1,1] 归一化坐标网格
+// multiplier: 插值时间步长 (2x=0.5)
+__global__ void rife_fill_grid_multiplier_kernel(
+    float* __restrict__ trt_input, int w, int h,
+    int totalChannels, float timestep)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= w || y >= h) return;
+
+    size_t plane = (size_t)w * h;
+    int base = y * w + x;
+
+    // channel 7: x 轴网格 [-1, 1]
+    trt_input[7 * plane + base] = 2.0f * x / (w - 1.0f) - 1.0f;
+    // channel 8: y 轴网格 [-1, 1]
+    trt_input[8 * plane + base] = 2.0f * y / (h - 1.0f) - 1.0f;
+    // channel 9-10: 时间步长 multiplier
+    trt_input[9 * plane + base] = timestep;
+    trt_input[10 * plane + base] = timestep;
+}
+
 // ── Launch wrappers (extern "C") ──
 extern "C" void launch_rgba_to_rgb_float(
     const uint8_t* rgba, int rgba_pitch,
@@ -66,4 +91,14 @@ extern "C" void launch_rgb_float_to_rgba(
     dim3 grid((w + block.x - 1) / block.x, (h + block.y - 1) / block.y);
     rgb_float_to_rgba_kernel<<<grid, block, 0, stream>>>(
         rgb_float, w, h, rgba, rgba_pitch);
+}
+
+extern "C" void launch_rife_fill_grid_multiplier(
+    float* trt_input, int w, int h,
+    int totalChannels, float timestep, cudaStream_t stream)
+{
+    dim3 block(32, 16);
+    dim3 grid((w + block.x - 1) / block.x, (h + block.y - 1) / block.y);
+    rife_fill_grid_multiplier_kernel<<<grid, block, 0, stream>>>(
+        trt_input, w, h, totalChannels, timestep);
 }
