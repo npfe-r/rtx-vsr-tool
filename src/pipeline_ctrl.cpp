@@ -520,6 +520,7 @@ void PipelineController::ThreadFuncImpl() {
             LogStatus(onStatus, buf);
         } else {
             LogStatus(onStatus, "RIFE 帧插值初始化失败，将不使用");
+            if (onError) onError(L"RIFE 帧插值初始化失败：请确保 rife_v4.6.onnx 模型文件与程序在同一目录");
         }
     }
 
