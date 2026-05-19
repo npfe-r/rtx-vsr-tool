@@ -127,7 +127,7 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
     }
 
     // 2. 从 ONNX 构建
-    LOG("从 ONNX 构建 TensorRT engine（首次约 10-30 秒）...");
+    LOG("从 ONNX 构建 TensorRT engine（首次需 1-5 分钟，请耐心等待）...");
 
     IBuilder* builder = createInferBuilder(g_trtLogger);
     if (!builder) { m_lastError = "createInferBuilder 失败"; LOG("createInferBuilder 失败"); return false; }
@@ -168,6 +168,7 @@ bool FrameInterpolatorRIFE::LoadOrBuildEngine(const char* onnxPath) {
         LOG("启用 FP16 模式");
     }
 
+    LOG("正在构建 engine（编译 CUDA 内核，请耐心等待）...");
     IHostMemory* serialized = builder->buildSerializedNetwork(*net, *cfg);
     if (!serialized) {
         m_lastError = "TensorRT engine 构建失败，请检查日志以获取详细信息";
