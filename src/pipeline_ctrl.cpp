@@ -498,12 +498,19 @@ void PipelineController::ThreadFuncImpl() {
         int frucW = m_fiBeforeVsr ? m_srcW : m_dstW;
         int frucH = m_fiBeforeVsr ? m_srcH : m_dstH;
 
-        // 构造 ONNX 绝对路径（相对于 exe 目录）
+        // 构造 ONNX 路径: exe 在 build/<config>/ 下，向上两级到 cmake 源目录
         char modelPath[MAX_PATH];
         {
             wchar_t exeDir[MAX_PATH];
             GetModuleFileNameW(NULL, exeDir, MAX_PATH);
+            // 去掉 exe 文件名 → build/<config>
             wchar_t* p = wcsrchr(exeDir, L'\\');
+            if (p) *p = L'\0';
+            // 去掉 <config> → build
+            p = wcsrchr(exeDir, L'\\');
+            if (p) *p = L'\0';
+            // 去掉 build → cmake 源目录
+            p = wcsrchr(exeDir, L'\\');
             if (p) *p = L'\0';
             char dirA[MAX_PATH];
             WideCharToMultiByte(CP_UTF8, 0, exeDir, -1, dirA, MAX_PATH, NULL, NULL);
