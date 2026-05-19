@@ -508,7 +508,7 @@ void PipelineController::ThreadFuncImpl() {
             char dirA[MAX_PATH];
             WideCharToMultiByte(CP_UTF8, 0, exeDir, -1, dirA, MAX_PATH, NULL, NULL);
             snprintf(modelPath, sizeof(modelPath),
-                     "%s/models/rife/rife-v4.6/flownet.onnx", dirA);
+                     "%s/models/rife/rife-v4.6/rife_v4.6.onnx", dirA);
         }
 
         if (m_frameInterpolatorRIFE.Initialize(frucW, frucH, m_cfg.gpuIndex, modelPath)) {
