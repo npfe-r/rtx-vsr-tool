@@ -37,7 +37,9 @@ MainWindow::MainWindow()
 MainWindow::~MainWindow()
 {
     m_pipeline.Stop();
-    SaveUIToConfig();
+    m_config.GetPipeline() = m_pc;
+    widen(m_inputPath,  m_config.GetWindow().lastInputPath,  MAX_PATH);
+    widen(m_outputPath, m_config.GetWindow().lastOutputPath, MAX_PATH);
     m_config.Save();
 
     ImGui_ImplDX11_Shutdown();
@@ -159,10 +161,10 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
     wc.lpszClassName = CLASS_NAME;
     RegisterClassExW(&wc);
 
-    VSRConfig& cfg = m_config.Get();
+    WindowState& ws = m_config.GetWindow();
 
-    int winW = cfg.windowW;
-    int winH = cfg.windowH;
+    int winW = ws.windowW;
+    int winH = ws.windowH;
 
     // Always center on screen
     int winX = (GetSystemMetrics(SM_CXSCREEN) - winW) / 2;
@@ -235,7 +237,9 @@ bool MainWindow::Create(HINSTANCE hInstance, int nCmdShow)
     ImGui_ImplWin32_Init(m_hWnd);
     ImGui_ImplDX11_Init(m_d3dDevice, m_d3dContext);
 
-    LoadConfigToUI();
+    m_pc = m_config.GetPipeline();
+    narrow(m_config.GetWindow().lastInputPath,  m_inputPath,  sizeof(m_inputPath));
+    narrow(m_config.GetWindow().lastOutputPath, m_outputPath, sizeof(m_outputPath));
 
     // Try to read last input file info on startup — skip silently on failure
     if (m_inputPath[0]) {
@@ -551,9 +555,10 @@ void MainWindow::RenderUI()
         float padY  = ImGui::GetStyle().WindowPadding.y;
         const int nControls   = 10;  // update when adding/removing setting rows
         const int nSeparators = 3;
+        const float bottomMargin = 5.0f;
         // Separator overhead: ImGui::Separator() ≈ sepH * 2 + 2px (spacing + line + spacing)
         float sepOverhead = nSeparators * (sepH * 2.0f + 2.0f);
-        midH = nControls * itemH + sepOverhead + padY * 2.0f;
+        midH = nControls * itemH + sepOverhead + padY * 2.0f + bottomMargin;
     }
 
     // Background vertical divider
@@ -569,11 +574,14 @@ void MainWindow::RenderUI()
     ImGui::Begin("##infopanel", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse);
 
-    // Input info — top half
-    float halfH = ImGui::GetContentRegionAvail().y * 0.48f;
-    ImGui::BeginChild("##inputinfo", ImVec2(-1, halfH));
+    // Input info — top half (split available space equally, minus separator spacing)
+    float sepSpacing = ImGui::GetStyle().ItemSpacing.y;
+    float halfH = (ImGui::GetContentRegionAvail().y - sepSpacing) * 0.5f;
+    ImGui::BeginChild("##inputinfo", ImVec2(-1, halfH), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::AlignTextToFramePadding();
     ImGui::Text("输入视频");
@@ -652,7 +660,7 @@ void MainWindow::RenderUI()
     ImGui::Spacing();
 
     // Output info — bottom half
-    ImGui::BeginChild("##outputinfo", ImVec2(-1, halfH));
+    ImGui::BeginChild("##outputinfo", ImVec2(-1, halfH), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::Text("输出视频");
     ImGui::Spacing();
@@ -661,9 +669,9 @@ void MainWindow::RenderUI()
         int srcW = m_videoInfo.width;
         int srcH = m_videoInfo.height;
         int outW, outH;
-        if (m_outputMode == 0) { outW = srcW * 2; outH = srcH * 2; }
-        else if (m_outputMode == 1) { outW = srcW * 4; outH = srcH * 4; }
-        else { outW = m_outputWidth; outH = m_outputHeight; }
+        if (m_pc.outputMode == 0) { outW = srcW * 2; outH = srcH * 2; }
+        else if (m_pc.outputMode == 1) { outW = srcW * 4; outH = srcH * 4; }
+        else { outW = m_pc.outputWidth; outH = m_pc.outputHeight; }
         outW = (outW + 15) & ~15;
         outH = (outH + 15) & ~15;
 
@@ -681,7 +689,7 @@ void MainWindow::RenderUI()
                                          "libx264", "libx265", "libaom-av1", "SVT-AV1"};
         ImGui::Text("编码");
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_encoderIndex]);
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "%s", encNames[m_pc.encoderIndex]);
 
         // Output frame count
         int outFrames = m_videoInfo.totalFrames;
@@ -691,7 +699,7 @@ void MainWindow::RenderUI()
 
         // Output colour info
         {
-            bool outIsHdr = m_trueHdrEnabled;
+            bool outIsHdr = m_pc.trueHdrEnabled;
             bool inIsHdr  = (m_videoInfo.avColorTransfer == AVCOL_TRC_SMPTE2084 || m_videoInfo.avColorTransfer == AVCOL_TRC_ARIB_STD_B67);
             ImGui::Text("色彩");
             ImGui::SameLine();
@@ -707,10 +715,10 @@ void MainWindow::RenderUI()
         static const char* audNames[] = {"无", "复制", "AAC"};
         ImGui::Text("音频");
         ImGui::SameLine();
-        if (m_audioMode == 0)
+        if (m_pc.audioMode == 0)
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1), "无");
-        else if (m_audioMode == 2)
-            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_audioBitrate);
+        else if (m_pc.audioMode == 2)
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "AAC %dkbps", m_pc.audioBitrate);
         else
             ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "复制");
 
@@ -719,15 +727,15 @@ void MainWindow::RenderUI()
             bool hadWarning = m_encoderWarning[0] != '\0';
             m_encoderWarning[0] = '\0';
             // TrueHDR + unsupported encoder warning
-            if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3)) {
+            if (m_pc.trueHdrEnabled && (m_pc.encoderIndex == 0 || m_pc.encoderIndex == 3)) {
                 snprintf(m_encoderWarning, sizeof(m_encoderWarning),
                          "TrueHDR 需要 10-bit 编码器，当前编码器不支持，建议切换到 HEVC 或 AV1");
-            } else if (m_encoderIndex == 0) {
+            } else if (m_pc.encoderIndex == 0) {
                 if (outW > 4096 || outH > 4096)
                     snprintf(m_encoderWarning, sizeof(m_encoderWarning),
                              "H.264 NVENC 不支持 %dx%d (最大 4096x4096)，建议切换到 HEVC 或 AV1",
                              outW, outH);
-            } else if (m_encoderIndex <= 2) {
+            } else if (m_pc.encoderIndex <= 2) {
                 if (outW > 8192 || outH > 8192)
                     snprintf(m_encoderWarning, sizeof(m_encoderWarning),
                              "NVENC 不支持 %dx%d (最大 8192x8192)，建议切换到软件编码器",
@@ -769,10 +777,9 @@ void MainWindow::RenderUI()
         std::vector<const char*> gpuPtrs;
         for (const auto& n : m_gpuNames)
             gpuPtrs.push_back(n.c_str());
-        if (m_gpuIndex >= (int)gpuPtrs.size())
-            m_gpuIndex = 0;
-        if (ImGui::Combo("##gpu", &m_gpuIndex, gpuPtrs.data(), (int)gpuPtrs.size()))
-            m_config.Get().gpuIndex = m_gpuIndex;
+        if (m_pc.gpuIndex >= (int)gpuPtrs.size())
+            m_pc.gpuIndex = 0;
+        ImGui::Combo("##gpu", &m_pc.gpuIndex, gpuPtrs.data(), (int)gpuPtrs.size());
     }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
@@ -785,13 +792,11 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* qualityNames[] = { "低质量", "中等", "高质量", "极致" };
-    int qualityIdx = m_qualityLevel - 1;
+    int qualityIdx = m_pc.qualityLevel - 1;
     if (qualityIdx < 0) qualityIdx = 0;
     if (qualityIdx > 3) qualityIdx = 3;
-    if (ImGui::Combo("##quality", &qualityIdx, qualityNames, 4)) {
-        m_qualityLevel = qualityIdx + 1;
-        m_config.Get().qualityLevel = m_qualityLevel;
-    }
+    if (ImGui::Combo("##quality", &qualityIdx, qualityNames, 4))
+        m_pc.qualityLevel = qualityIdx + 1;
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -801,12 +806,10 @@ void MainWindow::RenderUI()
     ImGui::SameLine(labelW);
     if (m_isRunning) ImGui::BeginDisabled();
     {
-        bool hdrOn = (m_trueHdrEnabled != 0);
-        if (ImGui::Checkbox("##truehdr", &hdrOn)) {
-            m_trueHdrEnabled = hdrOn ? 1 : 0;
+        if (ImGui::Checkbox("##truehdr", &m_pc.trueHdrEnabled)) {
             // Auto-switch to HEVC NVENC if current encoder doesn't support 10-bit
-            if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3))
-                m_encoderIndex = 1;
+            if (m_pc.trueHdrEnabled && (m_pc.encoderIndex == 0 || m_pc.encoderIndex == 3))
+                m_pc.encoderIndex = 1;
         }
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1), "TrueHDR");
@@ -840,10 +843,10 @@ void MainWindow::RenderUI()
             if (*val > maxV) *val = maxV;
         };
 
-        thdrSlider("对比度",   "c", &m_thdrContrast,    0,   200);
-        thdrSlider("饱和度",   "s", &m_thdrSaturation,  0,   200);
-        thdrSlider("中间灰",   "m", &m_thdrMiddleGray,  10,  100);
-        thdrSlider("峰值亮度", "l", &m_thdrMaxLuminance, 400, 2000);
+        thdrSlider("对比度",   "c", &m_pc.thdrContrast,    0,   200);
+        thdrSlider("饱和度",   "s", &m_pc.thdrSaturation,  0,   200);
+        thdrSlider("中间灰",   "m", &m_pc.thdrMiddleGray,  10,  100);
+        thdrSlider("峰值亮度", "l", &m_pc.thdrMaxLuminance, 400, 2000);
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -854,10 +857,10 @@ void MainWindow::RenderUI()
         }
         ImGui::SameLine();
         if (ImGui::Button("恢复默认", ImVec2(btnW, 0))) {
-            m_thdrContrast    = 100;
-            m_thdrSaturation  = 100;
-            m_thdrMiddleGray  = 50;
-            m_thdrMaxLuminance = 1000;
+            m_pc.thdrContrast    = 100;
+            m_pc.thdrSaturation  = 100;
+            m_pc.thdrMiddleGray  = 50;
+            m_pc.thdrMaxLuminance = 1000;
         }
 
         ImGui::EndPopup();
@@ -871,8 +874,8 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* outputModes[] = { "2倍", "4倍", "自定义" };
-    if (ImGui::Combo("##outmode", &m_outputMode, outputModes, 3))
-        m_config.Get().outputMode = m_outputMode;
+    if (ImGui::Combo("##outmode", &m_pc.outputMode, outputModes, 3))
+        UpdateOutputExtension();
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -880,16 +883,16 @@ void MainWindow::RenderUI()
     ImGui::AlignTextToFramePadding();
     ImGui::Text("分辨率");
     ImGui::SameLine(labelW);
-    bool disableRes = (m_outputMode != 2) || m_isRunning;
+    bool disableRes = (m_pc.outputMode != 2) || m_isRunning;
     if (disableRes) ImGui::BeginDisabled();
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.44f);
-    ImGui::InputInt("##outw", &m_outputWidth);
+    ImGui::InputInt("##outw", &m_pc.outputWidth);
     ImGui::PopItemWidth();
     ImGui::SameLine();
     ImGui::Text("x");
     ImGui::SameLine();
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::InputInt("##outh", &m_outputHeight);
+    ImGui::InputInt("##outh", &m_pc.outputHeight);
     ImGui::PopItemWidth();
     if (disableRes) ImGui::EndDisabled();
 
@@ -904,16 +907,14 @@ void MainWindow::RenderUI()
         "H.264 NVENC", "HEVC NVENC", "AV1 NVENC",
         "libx264", "libx265", "libaom-av1", "SVT-AV1"
     };
-    bool hdrOn = (m_trueHdrEnabled != 0);
+    bool hdrOn = m_pc.trueHdrEnabled;
     if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::BeginCombo("##enc", encoderNames[m_encoderIndex], 0)) {
+    if (ImGui::BeginCombo("##enc", encoderNames[m_pc.encoderIndex], 0)) {
         for (int i = 0; i < 7; i++) {
             bool disabled = hdrOn && (i == 0 || i == 3);
             if (disabled) ImGui::BeginDisabled();
-            if (ImGui::Selectable(encoderNames[i], i == m_encoderIndex)) {
-                m_encoderIndex = i;
-                m_config.Get().encoderIndex = i;
-            }
+            if (ImGui::Selectable(encoderNames[i], i == m_pc.encoderIndex))
+                m_pc.encoderIndex = i;
             if (disabled) ImGui::EndDisabled();
         }
         ImGui::EndCombo();
@@ -928,18 +929,16 @@ void MainWindow::RenderUI()
     float crfSliderW = ImGui::GetContentRegionAvail().x - 56.0f;
     ImGui::PushItemWidth(crfSliderW);
     if (m_isRunning) ImGui::BeginDisabled();
-    if (ImGui::SliderInt("##crf", &m_crf, 0, 51))
-        m_config.Get().crf = m_crf;
+    ImGui::SliderInt("##crf", &m_pc.crf, 0, 51);
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::SameLine();
     ImGui::PushItemWidth(46);
     if (m_isRunning) ImGui::BeginDisabled();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(13, ImGui::GetStyle().FramePadding.y));
-    if (ImGui::InputInt("##crfv", &m_crf, 0, 0)) {
-        if (m_crf < 0) m_crf = 0;
-        if (m_crf > 51) m_crf = 51;
-        m_config.Get().crf = m_crf;
+    if (ImGui::InputInt("##crfv", &m_pc.crf, 0, 0)) {
+        if (m_pc.crf < 0) m_pc.crf = 0;
+        if (m_pc.crf > 51) m_pc.crf = 51;
     }
     ImGui::PopStyleVar();
     if (m_isRunning) ImGui::EndDisabled();
@@ -952,8 +951,8 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* speedNames[] = { "最快", "快速", "中等", "慢速", "最慢" };
-    if (ImGui::Combo("##speed", &m_encoderSpeed, speedNames, 5))
-        m_config.Get().encoderSpeed = m_encoderSpeed;
+    if (ImGui::Combo("##speed", &m_pc.encoderSpeed, speedNames, 5))
+        UpdateOutputExtension();
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -964,10 +963,8 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* containerNames[] = { "MP4", "MOV" };
-    if (ImGui::Combo("##container", &m_containerFormat, containerNames, 2)) {
-        m_config.Get().containerFormat = m_containerFormat;
+    if (ImGui::Combo("##container", &m_pc.container, containerNames, 2))
         UpdateOutputExtension();
-    }
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
     ImGui::Separator();
@@ -979,12 +976,12 @@ void MainWindow::RenderUI()
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
     if (m_isRunning) ImGui::BeginDisabled();
     static const char* audioModes[] = { "无音频", "复制源", "AAC编码" };
-    if (ImGui::Combo("##audio", &m_audioMode, audioModes, 3))
-        m_config.Get().audioMode = m_audioMode;
+    if (ImGui::Combo("##audio", &m_pc.audioMode, audioModes, 3))
+        UpdateOutputExtension();
     if (m_isRunning) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
-    const bool audioBitrateDisabled = m_isRunning || (m_audioMode != 2);
+    const bool audioBitrateDisabled = m_isRunning || (m_pc.audioMode != 2);
     ImGui::AlignTextToFramePadding();
     ImGui::Text("码率");
     ImGui::SameLine(labelW);
@@ -994,12 +991,10 @@ void MainWindow::RenderUI()
     static const int   bitrateValues[] = { 64, 96, 128, 192, 256, 320 };
     int brIdx = 2;
     for (int i = 0; i < 6; i++) {
-        if (m_audioBitrate == bitrateValues[i]) { brIdx = i; break; }
+        if (m_pc.audioBitrate == bitrateValues[i]) { brIdx = i; break; }
     }
-    if (ImGui::Combo("##abr", &brIdx, bitrateNames, 6)) {
-        m_audioBitrate = bitrateValues[brIdx];
-        m_config.Get().audioBitrate = m_audioBitrate;
-    }
+    if (ImGui::Combo("##abr", &brIdx, bitrateNames, 6))
+        m_pc.audioBitrate = bitrateValues[brIdx];
     if (audioBitrateDisabled) ImGui::EndDisabled();
     ImGui::PopItemWidth();
 
@@ -1143,7 +1138,7 @@ void MainWindow::OnSelectInput()
 
     if (GetOpenFileNameW(&ofn)) {
         narrow(path, m_inputPath, sizeof(m_inputPath));
-        wcscpy(m_config.Get().lastInputPath, path);
+        wcscpy(m_config.GetWindow().lastInputPath, path);
         m_nvdecProbed = false;
         m_fallbackMsg[0] = '\0';
 
@@ -1189,13 +1184,13 @@ void MainWindow::OnSelectInput()
         wchar_t* dot = wcsrchr(outPath, L'.');
         if (dot) {
             static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mov" };
-            int idx = m_containerFormat;
+            int idx = m_pc.container;
             if (idx < 0) idx = 0;
             if (idx > 1) idx = 0;
             wcscpy(dot, containerExt[idx]);
         }
         narrow(outPath, m_outputPath, sizeof(m_outputPath));
-        wcscpy(m_config.Get().lastOutputPath, outPath);
+        wcscpy(m_config.GetWindow().lastOutputPath, outPath);
     }
 }
 
@@ -1205,8 +1200,14 @@ void MainWindow::UpdateOutputExtension()
     widen(m_outputPath, outPath, MAX_PATH);
     wchar_t* dot = wcsrchr(outPath, L'.');
     if (dot) {
+        // Strip existing _VSR suffix before re-appending, to prevent
+        // repeated calls from building up _VSR_VSR_VSR_... chains.
+        size_t nameLen = dot - outPath;
+        if (nameLen >= 4 && wcsncmp(dot - 4, L"_VSR", 4) == 0)
+            dot -= 4;
+
         static const wchar_t* containerExt[] = { L"_VSR.mp4", L"_VSR.mov" };
-        int idx = m_containerFormat;
+        int idx = m_pc.container;
         if (idx < 0 || idx > 1) idx = 0;
         wcscpy(dot, containerExt[idx]);
     }
@@ -1239,7 +1240,7 @@ void MainWindow::OnSelectOutput()
 
     if (GetSaveFileNameW(&ofn)) {
         narrow(path, m_outputPath, sizeof(m_outputPath));
-        wcscpy(m_config.Get().lastOutputPath, path);
+        wcscpy(m_config.GetWindow().lastOutputPath, path);
     }
 }
 
@@ -1293,41 +1294,22 @@ void MainWindow::OnStartStop()
             }
         }
 
-        VSRConfig& cfg = m_config.Get();
+        // ---- Persist UI state to config ----
+        m_config.GetPipeline() = m_pc;
+        widen(m_inputPath,  m_config.GetWindow().lastInputPath,  MAX_PATH);
+        widen(m_outputPath, m_config.GetWindow().lastOutputPath, MAX_PATH);
 
-        PipelineConfig pc;
-        wchar_t wInput[MAX_PATH]  = {};
-        wchar_t wOutput[MAX_PATH] = {};
-        widen(m_inputPath,  wInput,  MAX_PATH);
-        widen(m_outputPath, wOutput, MAX_PATH);
-        pc.inputPath  = wInput;
-        pc.outputPath = wOutput;
-        pc.outputMode   = m_outputMode;
-        pc.outputWidth  = m_outputWidth;
-        pc.outputHeight = m_outputHeight;
-        pc.qualityLevel = m_qualityLevel;
-        pc.encoderIndex = m_encoderIndex;
-        pc.crf          = m_crf;
-        pc.encoderSpeed = m_encoderSpeed;
-        pc.gpuIndex     = m_gpuIndex;
-        pc.container    = m_containerFormat;
-        pc.audioMode = m_audioMode;
-        pc.audioBitrate = m_audioBitrate;
-        pc.trueHdrEnabled = (m_trueHdrEnabled != 0);
-        pc.thdrContrast    = m_thdrContrast;
-        pc.thdrSaturation  = m_thdrSaturation;
-        pc.thdrMiddleGray  = m_thdrMiddleGray;
-        pc.thdrMaxLuminance = m_thdrMaxLuminance;
-
-        cfg.qualityLevel = m_qualityLevel;
-        cfg.outputMode   = m_outputMode;
-        cfg.encoderIndex = m_encoderIndex;
-        cfg.crf          = m_crf;
-        cfg.encoderSpeed = m_encoderSpeed;
-        cfg.gpuIndex     = m_gpuIndex;
+        // ---- Set active paths on PipelineConfig ----
+        {
+            wchar_t wInput[MAX_PATH] = {}, wOutput[MAX_PATH] = {};
+            widen(m_inputPath,  wInput,  MAX_PATH);
+            widen(m_outputPath, wOutput, MAX_PATH);
+            m_pc.inputPath  = wInput;
+            m_pc.outputPath = wOutput;
+        }
 
         m_pipeline.Stop();
-        if (m_pipeline.Start(pc)) {
+        if (m_pipeline.Start(m_pc)) {
             m_isRunning          = true;
             m_progressPct        = 0.0f;
             m_showCompletePopup  = false;
@@ -1427,61 +1409,4 @@ void MainWindow::EnumGpus()
             m_gpuNames.push_back(buf);
         }
     }
-}
-
-// ============================================================================
-// Config UI synchronisation
-// ============================================================================
-
-void MainWindow::LoadConfigToUI()
-{
-    VSRConfig& cfg = m_config.Get();
-
-    narrow(cfg.lastInputPath,  m_inputPath,  sizeof(m_inputPath));
-    narrow(cfg.lastOutputPath, m_outputPath, sizeof(m_outputPath));
-    m_qualityLevel = cfg.qualityLevel;
-    if (m_qualityLevel < 1) m_qualityLevel = 1;
-    m_outputMode   = cfg.outputMode;
-    m_outputWidth  = cfg.fixedWidth;
-    m_outputHeight = cfg.fixedHeight;
-    m_encoderIndex = cfg.encoderIndex;
-    m_crf          = cfg.crf;
-    m_encoderSpeed = cfg.encoderSpeed;
-    m_gpuIndex     = cfg.gpuIndex;
-    m_containerFormat = cfg.containerFormat;
-    m_audioMode    = cfg.audioMode;
-    m_audioBitrate    = cfg.audioBitrate;
-    m_trueHdrEnabled    = cfg.trueHdrEnabled;
-    // Auto-correct encoder if TrueHDR is on and current encoder doesn't support 10-bit
-    if (m_trueHdrEnabled && (m_encoderIndex == 0 || m_encoderIndex == 3))
-        m_encoderIndex = 1;
-    m_thdrContrast      = cfg.thdrContrast;
-    m_thdrSaturation    = cfg.thdrSaturation;
-    m_thdrMiddleGray    = cfg.thdrMiddleGray;
-    m_thdrMaxLuminance  = cfg.thdrMaxLuminance;
-}
-
-void MainWindow::SaveUIToConfig()
-{
-    VSRConfig& cfg = m_config.Get();
-
-    widen(m_inputPath,  cfg.lastInputPath,  MAX_PATH);
-    widen(m_outputPath, cfg.lastOutputPath, MAX_PATH);
-
-    cfg.qualityLevel = m_qualityLevel;
-    cfg.outputMode   = m_outputMode;
-    cfg.fixedWidth   = m_outputWidth;
-    cfg.fixedHeight  = m_outputHeight;
-    cfg.encoderIndex = m_encoderIndex;
-    cfg.crf          = m_crf;
-    cfg.encoderSpeed = m_encoderSpeed;
-    cfg.gpuIndex     = m_gpuIndex;
-    cfg.containerFormat = m_containerFormat;
-    cfg.audioMode    = m_audioMode;
-    cfg.audioBitrate    = m_audioBitrate;
-    cfg.trueHdrEnabled  = m_trueHdrEnabled;
-    cfg.thdrContrast    = m_thdrContrast;
-    cfg.thdrSaturation  = m_thdrSaturation;
-    cfg.thdrMiddleGray  = m_thdrMiddleGray;
-    cfg.thdrMaxLuminance = m_thdrMaxLuminance;
 }

@@ -1,4 +1,5 @@
 #include "video_decoder.h"
+#include "color_converter.h"
 #include "color_types.h"
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -28,16 +29,6 @@ static int AvColorSpaceToMatrix(int avCS) {
             return COLOR_MATRIX_BT2020_CL;
         default:
             return COLOR_MATRIX_BT709;  // safe default for modern content
-    }
-}
-
-// Map AVColorSpace to libswscale SWS_CS_* constant for sws_setColorspaceDetails.
-static int AvColorSpaceToSWS(int avCS) {
-    switch (avCS) {
-        case 5:  case 6:  return 0;          // SWS_CS_ITU601
-        case 1:           return 1;          // SWS_CS_ITU709
-        case 9:  case 10: return 9;          // SWS_CS_BT2020
-        default:          return 1;          // default BT.709
     }
 }
 

@@ -11,34 +11,11 @@
 #include <condition_variable>
 #include <cuda_runtime.h>
 
+#include "color_converter.h"
 #include "video_decoder.h"
 #include "vsr_processor.h"
 #include "video_encoder.h"
 #include "color_types.h"
-
-extern "C" void launch_nv12_to_rgba(
-    const uint8_t* y_plane, int y_pitch,
-    const uint8_t* uv_plane, int uv_pitch,
-    uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange);
-
-extern "C" void launch_rgba_to_nv12(
-    const uint8_t* rgba, int rgba_pitch,
-    uint8_t* y_plane, int y_pitch,
-    uint8_t* uv_plane, int uv_pitch,
-    int w, int h, cudaStream_t stream, int colorMatrix, int srcRange);
-
-extern "C" void launch_abgr10_to_p010(
-    const uint8_t* abgr10, int abgr10_pitch,
-    uint8_t* y_plane, int y_pitch,
-    uint8_t* uv_plane, int uv_pitch,
-    int w, int h, bool bt2020, cudaStream_t stream);
-
-extern "C" void launch_p010_to_rgba_sdr(
-    const uint8_t* y_plane, int y_pitch,
-    const uint8_t* uv_plane, int uv_pitch,
-    uint8_t* rgba_out, int rgba_pitch,
-    int w, int h, int transfer, cudaStream_t stream);
 
 struct PipelineConfig {
     std::wstring inputPath;

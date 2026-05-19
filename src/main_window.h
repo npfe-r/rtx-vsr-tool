@@ -46,8 +46,6 @@ private:
     void    OnPipelineError(const wchar_t* msg);
     void    OnPipelineCompleted();
     void    OnPipelineStatus(const char* msg);
-    void    LoadConfigToUI();
-    void    SaveUIToConfig();
     void    EnumGpus();
     void    UpdateOutputExtension();
 
@@ -62,22 +60,7 @@ private:
     char    m_inputPath[512]   = {};
     char    m_outputPath[512]  = {};
     char    m_inputInfo[256]   = {};
-    int     m_qualityLevel     = 3;
-    int     m_outputMode       = 0;
-    int     m_outputWidth      = 3840;
-    int     m_outputHeight     = 2160;
-    int     m_encoderIndex     = 0;
-    int     m_crf              = 18;
-    int     m_encoderSpeed     = 3;
-    int     m_gpuIndex         = 0;
-    int     m_containerFormat  = 0;
-    int     m_audioMode        = 1;
-    int     m_audioBitrate     = 128;
-    int     m_trueHdrEnabled   = 0;
-    int     m_thdrContrast    = 100;
-    int     m_thdrSaturation  = 100;
-    int     m_thdrMiddleGray  = 50;
-    int     m_thdrMaxLuminance = 1000;
+    PipelineConfig m_pc;
     float   m_progressPct      = 0.0f;
     char    m_statusText[256]    = {};
     char    m_encoderWarning[256] = {};
