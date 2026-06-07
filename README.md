@@ -36,7 +36,7 @@
 
 | 依赖 | 路径 | 作用 |
 |---|---|---|
-| FFmpeg 8.1.1 shared | `../ffmpeg-8.1.1-full_build-shared/` | 视频解码/编码、音频处理 |
+| FFmpeg 8.1.1 shared | `../ffmpeg-8.1.1-full_build-shared/`（备选：`../ffmpeg-2026-05-11-git-17bc88e67f-full_build/` 快照） | 视频解码/编码、音频处理 |
 | NVIDIA RTX Video SDK v1.1.0 | `../RTX_Video_SDK_v1.1.0/` | VSR & TrueHDR API 头文件和运行时 DLL（`nvngx_vsr.dll`、`nvngx_truehdr.dll`） |
 | NVIDIA DLSS SDK 310.6 (NGX Core) | `../DLSS-310.6.0/` | NGX 核心库（`nvsdk_ngx_d.lib`） |
 | Dear ImGui v1.91.0 | 通过 CMake FetchContent 从镜像拉取 | GUI 界面（含 Win32 + D3D11 后端） |
@@ -243,11 +243,12 @@ src/
 ├── video_encoder.cpp / .h        # FFmpeg 编码（NVENC/软件）、音频转码/复用、GPU 零拷贝、10-bit 输出
 ├── cuda_yuv.cu                   # 自定义 CUDA 核函数：NV12↔RGBA、ABGR10→P010、P010→RGBA SDR 色调映射
 ├── color_types.h                 # ColorMatrix / ColorSrcRange 枚举
+├── color_converter.h             # CUDA 核函数包装器（nv12_to_rgba、rgba_to_nv12、abgr10_to_p010、p010_to_rgba_sdr）
 ├── ngx_init_test.cpp             # 独立 NGX 初始化诊断工具
 ├── test_cuda_enc.cpp             # CUDA hwcontext 诊断（NVENC 零拷贝可行性测试，已从主目标排除）
 ├── config.cpp / .h               # INI 配置文件读写（基于 Windows GetPrivateProfileString）
 └── include/
-    ├── nvsdk_ngx*.h              # NGX SDK 头文件（14 个）
+    ├── nvsdk_ngx*.h              # NGX SDK 头文件（12 个）
     ├── rtx_video_api.h           # RTX Video SDK 接口定义
     ├── debug_util.h              # LogMsg() 日志工具（OutputDebugString + 文件 + 控制台）
     └── utils.h                   # 工具宏（APP_ID、SafeRelease 等）
@@ -255,7 +256,7 @@ src/
 
 ## 输出格式
 
-- **封装格式**：mp4（默认）、mkv、mov——根据输出文件扩展名自动识别
+- **封装格式**：MP4（默认）或 MOV——在"设置"面板中切换容器类型
 - **编码器**：7 种可选——NVENC H.264 / HEVC / AV1，软件 libx264 / libx265 / libaom-av1 / SVT-AV1
 - **尺寸对齐**：16 像素对齐，确保 NV12 色度平面兼容
 - **像素格式**：SDR 模式全链路 NV12；TrueHDR 模式全链路 P010（10-bit）；GPU 上仅 VSR 阶段为 RGBA/ABGR10
